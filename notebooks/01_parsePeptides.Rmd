@@ -1,0 +1,468 @@
+---
+title: "Parse peptides and estimate proportion nascent"
+author:
+  - name: "Tom Smith code -- applied to Aris data"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: | 
+  Here, we parse the peptide-level output from Proteome Discoverer and extract 
+  the proportion nascent at the peptide level. We then aggregate over peptides from 
+  the same peptide to obtain the protein-level proportion.
+output:
+  pdf_document:
+  html_notebook: default
+geometry: margin=1in
+fontfamily: mathpazo
+fontsize: 11pt
+---
+
+```{r, message=FALSE}
+
+#### Load packages ####
+suppressMessages(library(camprotR))
+suppressMessages(library(ggplot2))
+suppressMessages(library(tidyverse))
+suppressMessages(library(MSnbase))
+#library(ggbeeswarm)
+#library(GO.db)
+suppressMessages(library(gplots))
+suppressMessages(library(here))
+
+# Standardise plotting aesthetics
+source(here('R/plotting.R'))
+
+select <- dplyr::select
+```
+
+Make the cRAP list for filtering
+```{r}
+# Load the cRAP FASTA used for the PD search
+crap.fasta <- Biostrings::fasta.index(
+  here('raw/cRAP_FullIdentifiers.fasta'),
+  seqtype = "AA"
+)
+
+# Extract the non cRAP UniProt accessions associated with each cRAP protein
+crap.accessions <- crap.fasta %>% 
+  pull(desc) %>% 
+  stringr::str_extract_all("(?<=\\|).*?(?=\\|)") %>% 
+  unlist() %>% 
+  .[!. %in% "000000"] # remove invalid UniProt accessions
+
+``` 
+
+We have multiple MS runs, so peptide sequence -> master protein assignments will not be consistent between runs. Below, we generate a consensus sequence to master protein assignment using an approximate parsimony approach
+```{r}
+peptide_infiles <- Sys.glob(here('raw/*_PeptideGroups.txt'))
+
+
+new_seq_to_master <- get_parsimony_pep2prot(peptide_infiles, seq_col='Sequence')
+
+```
+
+To get the information about which intensities are from PSMs relative to a spectrum matched peptide, we need to interrogate the PSM level data using `camprotR::silac_psm_seq_int`. 
+
+
+Below, we read in the results from the individual PD runs for each SILAC experiment, filter out cRAP proteins and peptides with redundant 'Quan.Info' etc and merge with the 'sequenced' information from the PSM-level files.
+
+```{r}
+abundance_data <- vector('list', length=length(peptide_infiles))
+names(abundance_data) <- peptide_infiles
+
+
+for(infile in peptide_infiles){
+
+  .data <- suppressMessages(parse_features(read.delim(infile),
+                          silac = TRUE,
+                          crap_proteins = crap.accessions,
+                          unique_master=FALSE))
+
+  infile_name <- gsub('_PeptideGroups.txt$', '', basename(infile))
+
+  # merge in the 'sequenced' information from the PSM-level data
+  psm_infile_name <- gsub('_PeptideGroups.txt$', '_PSMs.txt', infile)
+  
+  # modifications are written differently by PD in PSM and peptide-level files,
+  # Here we update the modification column before the merge
+  .data <- .data %>%
+    mutate(Modifications=remove_silac_modifications(Modifications, level='peptide')) %>%
+    rowwise() 
+  
+  sample_n <- strsplit(infile, split='_')[[1]][2]
+  
+  # heavy and light column names vary from sample to sample, so we grep them out
+  abundance_light_col <- colnames(.data)[grepl('Abundance.F[[:digit:]]{1,2}.Light.Sample', colnames(.data))]
+  abundance_heavy_col <- colnames(.data)[grepl('Abundance.F[[:digit:]]{1,2}.Heavy.Sample', colnames(.data))]
+  
+  # Filter to remove:
+  # 1. No quantification
+  # 2. Contaminants (according to PD, we have already removed most contaminants above with parse_features())
+  
+  # Add columns for heavy and light
+  # Select required columns
+  # Make unique rownames from sequence and modifications
+  .data <- .data %>%  
+    filter(Quan.Info=='',
+           Contaminant=='False',
+           !grepl('cRAP', Protein.Accessions),
+           !grepl('keratin', ignore.case=TRUE, Master.Protein.Descriptions)) %>%
+    mutate('heavy'=!!sym(abundance_heavy_col),
+           'light'=!!sym(abundance_light_col),
+           'row'=paste0(Sequence, '_:_', Modifications)) %>%
+    dplyr::select(heavy, light,
+                  Master.Protein.Accessions,
+                  Master.Protein.Descriptions,
+                  row) %>%
+    tibble::column_to_rownames('row')
+
+  abundance_data[[infile]] <- .data
+}
+```
+
+Below, we combine all the data sets and whilst doing so, add `type`, `replicate` columns describing the MS run
+```{r}
+# File contains sample information
+fileNames <- read.csv(here("raw/sampleInfo.csv"))
+
+abundance_data_complete <- abundance_data %>% names() %>% lapply(function(x){
+  
+  filename_split <- strsplit(basename(x), split='_')[[1]]
+  sample_No <- filename_split[2]
+  subset <- fileNames %>% filter(number == sample_No)
+  
+  cell_line <- subset$cell_line
+  timepoint <- subset$time
+  treatment <- subset$trt
+  rep <- subset$rep
+  
+  pep_data <- abundance_data[[x]] %>%
+    tibble::rownames_to_column('Sequence_modifications') %>%
+    mutate('cell_line'=cell_line, 'replicate'=rep, 'time_point'=timepoint, 'condition'=treatment) %>%
+    separate(Sequence_modifications, into=c('Sequence', 'Modifications'),
+             sep='_:_')
+}) %>% do.call(what='rbind') %>%
+  merge(new_seq_to_master, by='Sequence')
+
+abundance_data_complete <- abundance_data_complete %>%
+  filter(!grepl(';', Updated.Master.Protein.Accessions))
+
+table(abundance_data_complete$condition)
+print(dim(abundance_data_complete))
+
+head(abundance_data_complete)
+```
+
+Summarise the number of proteins per cell line
+
+```{r}
+# how many unique proteins
+sprintf("There are %s proteins identified (not necessarily both isotypes sequenced)", (length(unique(abundance_data_complete$Master.Protein.Accessions))))
+
+```
+
+How many ratios have we quantified for each sample? ~130,000 peptides per condition
+```{r}
+abundance_data_complete %>% 
+  filter((is.finite(heavy) & is.finite(light))) %>%
+  group_by(condition) %>%
+  tally()
+
+
+
+```
+~5-20,000 peptides per sample
+```{r}
+toPlot <- abundance_data_complete %>% 
+  filter((is.finite(heavy) & is.finite(light))) %>%
+  group_by(condition, replicate, time_point) %>%
+  tally() 
+
+
+ggplot(toPlot, aes(x=as.factor(time_point), y=n, group=replicate, fill=as.factor(replicate))) +
+  geom_bar(stat="identity", position=position_dodge(), color="black") +
+  facet_grid(.~condition) +
+  xlab("Time point") +
+  ylab('Ratios quantified') +
+  ggtitle("Number of peptides") +
+  guides(fill=guide_legend(title="Replicate"))
+#dev.off()
+
+```
+
+calculate the proportions and summarise the spectrum matched status
+
+```{r}
+spectrum_match_levels <- c('Mixed spectrum matched', 'Some Both spectrum matched',
+                           'Some Heavy spectrum matched', 'Some Light spectrum matched',
+                           'Both spectrum matched', 'Heavy spectrum matched', 'Light spectrum matched')
+
+
+proportion <- abundance_data_complete %>% #head() %>%
+  filter((is.finite(heavy) | is.finite(light))) %>%
+  mutate(heavy=log2(heavy), light=log2(light)) %>%
+  get_ratio(heavy, light, bind = TRUE) %>%
+  mutate(proportion=2^heavy/(2^light+2^heavy))
+
+
+
+print(head(proportion))
+```
+
+How many proteins have we quantified in each replicate? No great difference between the number of proteins in each experiment, though MCF10A reps 3 & 4 seem to have fewer proteins. In early timepoints, more likely to be missing in heavy, whereas in later timepoint, more likely to be missing in light. This is what we expect as the heavy isotope is increasingly integrated into the nascent proteins.   
+
+```{r, fig.height=7, fig.width=7}
+p <- proportion %>%
+  select(cell_line, time_point, missing, condition, replicate, Updated.Master.Protein.Accessions) %>%
+  distinct() %>%
+  group_by(cell_line, time_point, missing, condition, replicate) %>%
+  tally() %>%
+  ggplot(aes(interaction(condition, replicate), n, fill=missing)) +
+  theme_camprot( base_size=15) +
+  facet_grid(time_point~ cell_line, scales='free') +
+  scale_fill_manual(values=get_cat_palette(3), name='') +
+  xlab('') +
+  ylab('Fraction of peptides') +
+  theme(axis.text.x=element_text(size=10, angle=45, vjust=1, hjust=1))
+
+print(p + geom_bar(stat='summary', position='fill'))
+
+print(p + geom_bar(stat='summary', position='stack') +
+    ylab('# peptides')) 
+
+
+```
+Inspecting the ratios at the peptide level.
+```{r, fig.height=6, fig.width=6}
+
+
+proportion$condition <- factor(proportion$condition, levels= c("untrt", "GC7"))
+
+p <- proportion %>%
+  ggplot(aes(proportion, colour=condition, linetype=factor(replicate), group=(paste(condition, replicate)))) +
+  geom_density() +
+  theme(text=element_text(size=15)) +
+  facet_grid(time_point~cell_line) +
+  scale_colour_manual(values=get_cat_palette(2), name='') +
+  scale_linetype_discrete(name='Replicate') +
+  ylab('Density') +
+  xlab('proportion nascent translated')
+
+print(p)
+```
+
+
+
+Checking overall intensity is approximately the same for each experiment. Very consistent between the replicates.
+```{r}
+proportion %>%
+  group_by(condition, time_point) %>%
+  summarise('median'=median(heavy, na.rm=TRUE))
+
+
+p <- proportion %>%
+  #filter(!glyco_GO_RBP %in% c('GO:LC_RBGP', 'GO:HC_RBGP')) %>%
+  ggplot(aes(light, linetype=condition, colour=factor(time_point), group=(paste(time_point, replicate, condition)))) +
+  #xlim(-1,3) +
+  xlab('Intensity (light isotope)') +
+  geom_density() +
+  theme_camprot(base_size=15) +
+  #scale_colour_manual(values=get_cat_palette(6), name='') +
+  scale_linetype_discrete(name='Condition') +
+  scale_colour_manual(values=get_cat_palette(3), name='Time (h)')
+  ylab('Density')
+
+
+print(p) 
+
+print(p + aes(heavy) + xlab('Intensity (heavy isotope)'))
+
+
+```
+
+Below, we make MSnSets from the peptide-level proportions.
+```{r}
+
+makeMsnSet <- function(ratios){
+  
+  flt_ratios <- ratios %>%
+    filter(is.finite(ratio))
+  
+  exprs_data <- flt_ratios %>%
+    mutate(sample=paste(time_point, condition, gsub(' ', '.', replicate), sep='_')) %>%
+    dplyr::select(Updated.Master.Protein.Accessions, Master.Protein.Descriptions, Sequence, Modifications,
+                  sample, proportion) %>%
+    spread(key=sample, value=proportion)
+  
+  feature_data <- flt_ratios %>%
+    dplyr::select(Updated.Master.Protein.Accessions, Master.Protein.Descriptions, Sequence, Modifications) %>%
+    distinct()
+  
+  # make sure the exprs and fData are in the same order
+  feature_data <- feature_data[
+    match(interaction(exprs_data[c('Sequence', 'Modifications')]),
+          interaction(feature_data[c('Sequence', 'Modifications')])),]
+  
+  exprs_data <- exprs_data %>%
+    dplyr::select(-c(Updated.Master.Protein.Accessions, Master.Protein.Descriptions, Sequence, Modifications)) %>%
+    as.matrix()
+      
+  rownames(exprs_data) <- 1:nrow(exprs_data)
+  rownames(feature_data) <- 1:nrow(feature_data)
+  
+  peptide_abundance <- MSnSet(exprs=exprs_data, fData=feature_data)
+  
+  pData(peptide_abundance)$sample <- colnames(peptide_abundance)
+  pData(peptide_abundance) <- pData(peptide_abundance) %>% separate(sample, into=c('type', 'condition', 'replicate'), sep='_')
+
+  peptide_abundance
+}
+
+proportions <- makeMsnSet(proportion)
+```
+`proportions` is an MSnSet.
+
+Next we want to aggregate the proportions to get protein level proportions. First though, we need to decide how many peptides per protein will demand. More = more accurate quantification but fewer proteins quantified. Two is typically used, despite being very low.
+```{r}
+proportions %>%
+  fData() %>%
+  group_by(Updated.Master.Protein.Accessions) %>%
+  tally() %>%
+  ggplot(aes(log2(n))) +
+  stat_ecdf() +
+  theme_camprot() +
+  xlab('Peptides per protein (log2)') +
+  ylab('Fraction of proteins')
+  
+```
+So, roughly half the proteins only have 3 peptides in total across all samples. Let's look at this in more detail and see how filtering by peptides per protein will affect the final number of proteins quantified.
+
+```{r}
+CheckFilteringOptions <- function(peptide_abundance,
+                                  min_peptides_range=1:4){
+  rows <- NULL
+    for(min_peptides in min_peptides_range){
+      .data <- restrict_features_per_protein(peptide_abundance, min_features=min_peptides,
+                                             master_protein_col='Updated.Master.Protein.Accessions', plot=FALSE)
+      fData(.data)$min_peptides <- min_peptides
+      
+      retain_columns <- colnames(fData(.data))[!grepl('^MBR_', colnames(fData(.data)))]
+      rows[[min_peptides]] <- fData(.data)[,retain_columns]
+
+      }
+  
+  peptide_filtering_options <- data.frame(do.call('rbind', rows))
+  
+  return(peptide_filtering_options)
+}
+
+peptide_filtering_options <- CheckFilteringOptions(proportions)
+
+```
+
+```{r}
+
+
+peptide_filtering_options_peptides <- peptide_filtering_options %>%
+  select(Sequence, min_peptides) %>%
+  distinct() %>%
+  group_by(min_peptides) %>%
+  tally()
+
+peptide_filtering_options_proteins <- peptide_filtering_options %>%
+  select(Updated.Master.Protein.Accessions, min_peptides) %>%
+  distinct() %>%
+  group_by(min_peptides) %>%
+  tally()
+
+p <- peptide_filtering_options_peptides %>%
+  ggplot(aes(min_peptides, n)) +
+  geom_line() +
+  geom_point() +
+  theme_camprot() +
+  ylab('Peptides') + 
+  scale_colour_manual(values=get_cat_palette(2), name='') +
+  xlab('Min peptides per protein')
+
+print(p)
+print(p %+% peptide_filtering_options_proteins + ylab('Proteins'))
+```
+OK, so if we use minimum of 2 peptides per protein, we have ~ 4000 proteins.
+
+```{r}
+agg2protein <- function(pep_proportions){
+  
+  pep_proportions <- pep_proportions %>%
+    restrict_features_per_protein(min_features=2, master_protein_col='Updated.Master.Protein.Accessions')
+    
+
+  prot <-  combineFeatures(
+    pep_proportions,
+    groupBy = fData(pep_proportions)$Updated.Master.Protein.Accessions,
+    method = "median",
+    na.rm = TRUE,
+  )
+  
+  # we'll drop all the other feature data since these are peptide-level features
+  fData(prot) <- fData(prot)[,c( 'Updated.Master.Protein.Accessions', 'Master.Protein.Descriptions')]
+  
+  prot
+}
+
+
+prot_proportions <- proportions %>% agg2protein()
+
+```
+
+
+Quick inspection of the missing values in the data-set. So we have complete data for ~500-900 proteins per cell line, and about 4000 proteins in total in each cell line. This certainly seems enough to work with..
+```{r}
+
+plotMissing <- function(obj, missing_col=get_cat_palette(3), present_col='black', verbose=TRUE, ...){
+  tmp_obj <- obj
+  exprs(tmp_obj)[!is.na(exprs(tmp_obj))] <- 1
+  exprs(tmp_obj)[is.na(exprs(tmp_obj))] <- 0
+  
+  missing <- exprs(tmp_obj)
+
+  missing <- missing[rowSums(missing==0)>0,,drop=FALSE] # identify features with missing values
+
+  if(verbose){
+    cat(sprintf("Out of %s total features, %s (%s%%) have missing values\n",
+                length(rownames(exprs(tmp_obj))), length(rownames(missing)),
+                round(100*length(rownames(missing))/length(rownames(exprs(tmp_obj))),3)))
+    if(nrow(missing)>1){
+      print(table(rowSums(missing==0)))
+    }
+  }
+
+  if(nrow(missing)>1){
+    missing_twice <- missing[rowSums(missing==0)>1,]
+    
+    if(verbose){
+      cat(sprintf("And %s features have more than one missing value\n", length(rownames(missing_twice))))
+    }
+    
+    colnames(missing) <- pData(tmp_obj)$Sample_name
+    
+    heatmap.2(missing, col = c(missing_col, present_col),
+              scale = "none", dendrogram = "none",
+              trace = "none", keysize = 0.5, key = FALSE,Colv = F, labRow=F,
+              ...)
+  }
+}
+  
+
+table(is.na(prot_proportions))
+plotNA(prot_proportions, pNA=0)
+prot_proportions %>% plotMissing()
+
+
+
+```
+
+Save out the objects we will need in downstream notebooks.
+```{r}
+saveRDS(prot_proportions, here('results/prot_proportion.rds'))
+saveRDS(proportions, here('results/pep_proportion.rds'))
+saveRDS(proportion, here('results/pep_proportion_long.rds'))
+```

@@ -1,0 +1,140 @@
+---
+title: "Plot the proportions"
+author:
+  - name: "Tom Smith"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: | 
+  Here we use the protein-level propertion object rendered in the previous notebook 
+  and visualize the change in incorporation over time in the different samples.
+
+output:
+  pdf_document:
+  html_notebook: default
+geometry: margin=1in
+fontfamily: mathpazo
+fontsize: 11pt
+---
+
+
+```{r}
+suppressMessages(library(dplyr))
+suppressMessages(library(tidyr))
+#suppressMessages(library(reshape2))
+suppressMessages(library(ggplot2))
+#suppressMessages(library(limma))
+suppressMessages(library(MSnbase))
+suppressMessages(library(camprotR))
+suppressMessages(library(here))
+
+# Standardise plotting aesthetics
+source(here('R/plotting.R'))
+
+```
+
+
+
+```{r}
+prot_proportions <- readRDS(here('results/prot_proportion.rds'))
+pep_proportions_counts <- readRDS(here('results/pep_proportion_long.rds')) %>%
+  filter(is.finite(ratio)) %>%
+  group_by(Master.Protein.Accessions, replicate, condition) %>%
+  tally()
+```
+
+Prepare proportions for plotting
+```{r}
+get_prot_proportions_for_plot <- function(prot_proportions){
+  
+  prot_proportions_for_plot <- prot_proportions %>%
+    exprs() %>%
+    merge(fData(prot_proportions), by='row.names') %>%
+    as.data.frame() %>%
+    gather(key='sample', value='proportion',
+           -c(Row.names, Master.Protein.Descriptions)) %>%
+    merge(pData(prot_proportions), by.x='sample', by.y='row.names') %>%
+    mutate(proportion=as.numeric(proportion)) %>%
+    filter(is.finite(proportion)) %>%
+    mutate(type=factor(type, levels = c("3", "6", "24")))
+  
+  return(prot_proportions_for_plot)
+}
+
+prot_proportions_for_plot <- get_prot_proportions_for_plot(prot_proportions)
+
+head(prot_proportions_for_plot)
+
+```
+
+
+Plot proportions
+```{r}
+
+p <- prot_proportions_for_plot %>%
+  mutate(condition=recode(condition, 'untrt'='Control')) %>%
+  ggplot(aes(proportion, colour=condition, linetype=replicate)) +
+  geom_density() +
+  theme(axis.text=element_text(size=10)) +
+  facet_wrap(~as.numeric(replicate)) +
+  scale_colour_manual(values=c(get_cat_palette(3), 'black'), name='') +
+  xlab('Proportion nascent protein') +
+  facet_grid(.~type) +
+  scale_linetype_discrete(name='Replicate') +
+  ylab('Density') +
+  scale_x_continuous(limits=c(0,1), breaks=seq(0,1,0.2))
+      
+    
+print(p)
+ggsave(here('notebooks/plots/proportion_nascent_dist.png'))
+ggsave(here('notebooks/plots/proportion_nascent_dist.pdf'))
+
+```
+Compare proportions between A549 and MCF10A. The correlation is not great --> A549 has faster protein turnover than MCF10A, as would be expected from a tumoral line. 
+
+
+
+```{r}
+compare_proportions_conditions <- prot_proportions_for_plot %>%
+      select(-sample) %>%
+      pivot_wider(values_from=proportion, names_from=condition)
+
+saveRDS(compare_proportions_conditions, here('results/compare_proportions_conditions.rds'))
+
+compare_proportions_type <- prot_proportions_for_plot %>%
+      select(-sample) %>%
+      pivot_wider(values_from=proportion, names_from=type)
+
+saveRDS(compare_proportions_type, here('results/compare_proportions_type.rds'))
+  
+
+
+
+```
+
+
+
+
+Plot correlation of proportions between DMSO & Tg. Median correlation here and overall lower nascent in Tg, especially for RNA-bound, as expected.
+```{r, fig.height=7, fig.width=7}
+condition_proportion_cor_per_rep <- compare_proportions_conditions %>%
+  filter(is.finite(GC7), is.finite(untrt)) %>%
+  group_by(type, replicate) %>%
+  summarise(cor=cor(GC7, untrt, use='complete', method='spearman'))
+  
+compare_proportions_conditions %>%
+  ggplot(aes(y=100*GC7, 100*untrt)) +
+  xlim(0, 100) +
+  ylim(0, 100) +
+  geom_abline(slope=1, linetype=2, colour='grey') +
+  geom_point(size=0.5, alpha=0.5) +
+  geom_text(data=condition_proportion_cor_per_rep, inherit.aes=FALSE,
+            aes(label=paste0('rho=', sprintf("%.2f", cor))), x=0, y=100, hjust=0, size=3) +
+  facet_grid(replicate~type) +
+  ylab('Proportion nascent in GC7') +
+  xlab('Proportion nascent in untrt') +
+  theme(text=element_text(size=15))
+```   
+OK, great, so there is a good correlation between the conditions, but at 3hr there seem to be more proteins off the diagonal (higher or lower translation with GC7 inhibition). I suspect this is just less accurate quantification. Later, we'll see if these are consistent differences.
+
+
+
