@@ -1,0 +1,47 @@
+---
+title: "Save results"
+author:
+  - name: "Tom Smith"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: | 
+  Here, we save results as excel spreadsheets
+output:
+  pdf_document:
+  html_notebook: default
+geometry: margin=1in
+fontfamily: mathpazo
+fontsize: 11pt
+---
+```{r}
+suppressMessages(library(here))
+suppressMessages(library(tidyverse))
+suppressMessages(library(writexl))
+suppressMessages(library(MSnbase))
+```
+
+```{r}
+proportions <- readRDS(here("results/prot_proportion.rds"))
+deqms_fit <- readRDS(here("results/deqms_go_annot.rds"))
+```
+
+
+
+Save output to excel files
+```{r}
+write_xlsx(deqms_fit,
+  path = here("results/statistical_test_results.xlsx"),
+  col_names = TRUE,
+  format_headers = TRUE,
+  use_zip64 = FALSE)
+```
+
+```{r}
+proportions_data_to_write <- data.frame(exprs(proportions))
+
+write_xlsx(proportions_data_to_write,
+  path = here("results/proportions.xlsx"),
+  col_names = TRUE,
+  format_headers = TRUE,
+  use_zip64 = FALSE)
+```

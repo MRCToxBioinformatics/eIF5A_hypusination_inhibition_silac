@@ -20,9 +20,7 @@ fontsize: 11pt
 ```{r}
 suppressMessages(library(dplyr))
 suppressMessages(library(tidyr))
-#suppressMessages(library(reshape2))
 suppressMessages(library(ggplot2))
-#suppressMessages(library(limma))
 suppressMessages(library(MSnbase))
 suppressMessages(library(camprotR))
 suppressMessages(library(here))
@@ -72,14 +70,12 @@ Plot proportions
 
 p <- prot_proportions_for_plot %>%
   mutate(condition=recode(condition, 'untrt'='Control')) %>%
-  ggplot(aes(proportion, colour=condition, linetype=replicate)) +
+  ggplot(aes(proportion, colour=condition, group=interaction(condition, replicate))) +
   geom_density() +
   theme(axis.text=element_text(size=10)) +
-  facet_wrap(~as.numeric(replicate)) +
-  scale_colour_manual(values=c(get_cat_palette(3), 'black'), name='') +
+  scale_colour_manual(values=c(get_cat_palette(2)), name='') +
   xlab('Proportion nascent protein') +
-  facet_grid(.~type) +
-  scale_linetype_discrete(name='Replicate') +
+  facet_grid(type~.) +
   ylab('Density') +
   scale_x_continuous(limits=c(0,1), breaks=seq(0,1,0.2))
       
@@ -89,9 +85,50 @@ ggsave(here('notebooks/plots/proportion_nascent_dist.png'))
 ggsave(here('notebooks/plots/proportion_nascent_dist.pdf'))
 
 ```
-Compare proportions between A549 and MCF10A. The correlation is not great --> A549 has faster protein turnover than MCF10A, as would be expected from a tumoral line. 
 
 
+```{r}
+p <- prot_proportions_for_plot %>%
+  mutate(condition=recode(condition, 'untrt'='Control')) %>%
+  ggplot(aes(interaction(replicate, condition), proportion, colour=condition)) +
+  geom_violin() +
+  geom_boxplot(width=0.2, colour='black', outlier.shape = NA) +
+  theme(axis.text=element_text(size=10)) +
+  scale_colour_manual(values=c(get_cat_palette(3), 'black'), name='') +
+  ylab('Proportion nascent protein') +
+  facet_grid(.~type, scales='free', space='free') +
+  xlab('') +
+  theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1))
+      
+    
+print(p)
+ggsave(here('notebooks/plots/proportion_nascent_dist_violin.png'))
+ggsave(here('notebooks/plots/proportion_nascent_dist_violin.pdf'))
+```
+```{r, fig.height=6, fig.width=3}
+p <- prot_proportions_for_plot %>%
+  mutate(condition=recode(condition, 'untrt'='Control')) %>%
+  arrange(type) %>%
+  mutate(timepoint=sprintf('%s hr', type)) %>%
+  mutate(timepoint=factor(timepoint, levels=unique(timepoint))) %>%
+  ggplot(aes(proportion, colour=condition, group=interaction(condition, replicate))) +
+  stat_density(geom="line",position="identity") +
+  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
+  scale_colour_manual(values=get_cat_palette(2), name='') +
+  xlab('Proportion nascent\nprotein') +
+  facet_wrap(~timepoint, ncol=1) +
+  ylab('Density') +
+  scale_x_continuous(limits=c(0,1), breaks=seq(0,1,0.5)) +
+  theme(strip.background=element_blank(),
+        legend.background=element_blank(),
+        legend.position=c(0.7,0.97))
+  
+
+print(p)
+ggsave(here('figures/plots/proportion_nascent_dist.pdf'))
+ggsave(here('figures/plots/proportion_nascent_dist.png'))
+
+```
 
 ```{r}
 compare_proportions_conditions <- prot_proportions_for_plot %>%

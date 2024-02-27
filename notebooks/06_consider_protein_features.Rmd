@@ -1,0 +1,532 @@
+---
+title: "Sequence features"
+author:
+  - name: "Tom Smith"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: |
+  Check for relationship between sequence features, e.g AA such as proline and
+  the effect of GC7
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+```{r}
+suppressMessages(library(goseq))
+suppressMessages(library(tidyr))
+suppressMessages(library(dplyr))
+suppressMessages(library(camprotR))
+suppressMessages(library(glmnet))
+suppressMessages(library(here))
+suppressMessages(library(ggbeeswarm))
+suppressMessages(library(RColorBrewer))
+```
+
+
+
+Read in the protein feature objects created previously and the results from DEqMS.
+```{r}
+
+aa_count <- readRDS(here('results/aa_count.rds'))
+p_i_counts <- readRDS(here('results/p_i_counts.rds'))
+deqms_fit <-  readRDS(here('results/deqms.rds'))
+```
+
+
+We will only consider the 6 hour data, since basically all proteins are affected at 24hr and there is very little impact at 3hr.
+```{r}
+deqms_res <- deqms_fit$`6` %>% filter(is.finite(sig))
+
+
+# merge on the sequence features
+deqms_res_aa <- deqms_res %>%
+  merge(aa_count, by.x='entry', by.y='row.names') %>%
+  merge(p_i_counts, by.x='entry', by.y='row.names')
+
+# basic plot for relationship between prolines and GC7 vs control fold-change
+p <- deqms_res_aa %>%
+  ggplot(aes(log2(P), logFC)) +
+  geom_hline(yintercept=0, linetype=2, colour='grey') +
+  geom_point(size=0.5, alpha=0.5) +
+  theme_camprot() +
+  geom_smooth()  +
+  ylab('GC7 vs Control (log2)')
+
+print(p)
+
+
+print(p + aes(P/total))
+print(p + aes(PP/total))
+print(p + aes(PPP/total))
+print(p + aes(PPPP/total))
+print(p + aes(PPPPP/total))
+
+```
+
+Next, binary comparison of sig @ 6hr vs not sig for P frequency.
+```{r}
+print(table(deqms_res_aa$sig))
+p <- deqms_res_aa %>%
+  ggplot(aes(sig, P/total)) +
+  geom_boxplot() +
+  theme_camprot() +
+  xlab('GC7 vs Control significant')
+
+print(p)
+print(p + aes(y=log2(PP/total)))
+print(p + aes(y=log2(PPP/total)))
+print(p + aes(y=log2(PPPP/total)))
+print(p + aes(y=log2(PPPPP/total)))
+print(p + aes(y=log2(PPPPPP/total)))
+```
+No clear difference whatsoever for those proteins with significantly lower nascent protein at 6hr.
+
+
+
+Let's just do some quick correlations
+```{r}
+aa_cor <- aa_count %>% colnames() %>%
+  lapply(function(x) cor(deqms_res_aa$logFC, log2(deqms_res_aa[[x]]+1), method='spearman')) %>%
+  unlist()
+
+names(aa_cor) <- colnames(aa_count)
+print(aa_cor[order(-abs(aa_cor))])
+```
+OK, so correlating with the AA counts isn't very informative, since length is highly correlated with GC7 vs control so higher counts for any AA is positively correlated with GC7 vs control.
+
+
+When we convert to AA frequency (below), we see a positive correlation between D/E (acidic AA) and higher GC7 vs control (e.g less effected). Valine is the most negatively correlated. Highest absolute correlation is just 0.1 (D). Proline is very poorly correlated, as we've seen above.
+```{r}
+aa_freq_cor <- aa_count %>% colnames() %>% setdiff('total') %>%
+  lapply(function(x) cor(deqms_res_aa$logFC, deqms_res_aa[[x]]/deqms_res_aa$total, method='spearman')) %>%
+  unlist()
+
+names(aa_freq_cor) <- colnames(aa_count) %>% setdiff('total')
+print(aa_freq_cor[order(-abs(aa_freq_cor))])
+
+
+```
+
+
+
+
+
+
+```{r}
+
+deqms_res_all <- deqms_fit %>%
+  bind_rows(.id='timepoint') %>%
+  merge(aa_count[, 'P', drop=FALSE], by.x='entry', by.y='row.names') %>%
+  merge(p_i_counts, by.x='entry', by.y='row.names') %>%
+  pivot_longer(cols=c('P', 'PP', 'PPP', 'PPPP', 'PPPPP', 'PPPPPP'), names_to='p_stretch', values_to='n') %>%
+  mutate(present=n>0) %>%
+  mutate(timepoint=factor(timepoint, levels=c(3,6,24)))
+
+median_effect <- deqms_res_all %>% group_by(timepoint) %>%
+  summarise(median_effect=median(logFC))
+
+p <- deqms_res_all %>%
+  filter(present) %>%
+  mutate(p_stretch_len=nchar(p_stretch)) %>%
+  ggplot(aes(timepoint, logFC, colour=p_stretch_len, group=interaction(p_stretch_len, timepoint))) +
+  geom_quasirandom(size=0.25, dodge.width=0.85) +
+  stat_summary(geom='errorbar', fun.min='median', position=position_dodge(width=0.85), colour='black', width=1) +
+  scale_colour_continuous(name='Proline\nstretch\nlength', low='grey80', high=get_cat_palette(1)) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans') +
+  xlab('Time (hr)') +
+  ylab('Nascent protein\nGC7 vs Control (log2)')
+
+for(time_ix in seq_along(median_effect$timepoint)){
+  time = median_effect$timepoint[[time_ix]]
+  median=median_effect %>% filter(timepoint==time) %>% pull(median_effect)
+  p <- p + geom_segment(x=time_ix-0.425, xend=time_ix+0.425, y=median, yend=median, colour=get_cat_palette(7)[7], size=0.25)
+}
+
+print(p)
+ggsave(here('figures/plots/ppp_presence_6hr.pdf'))
+ggsave(here('figures/plots/ppp_presence_6hr.png'))
+```
+No clear relationship with presence of proline stretches.
+
+What about other previously published tri-AAs. Pelechano and Alepuz et al 2017 (https://academic.oup.com/nar/article/45/12/7326/3854954) looked at 43 tripeptides which caused the most marked ribosome stalls in the eIF5A mutants.
+
+```{r}
+pelechano_alepuz <- strsplit(readLines('../external/Pelechano_Alepuz_NAR_2017/human_motifs_abundance.txt', 1), '\t')[[1]]
+pelechano_alepuz_tripeptides <- pelechano_alepuz[nchar(pelechano_alepuz)==3]
+
+```
+
+```{r}
+pelechano_alepuz_tripeptides_freq <- readRDS(here('results/tri_freq.rds'))[,pelechano_alepuz_tripeptides]
+```
+
+```{r, fig.height=6, fig.width=6}
+deqms_res_all <- deqms_fit %>%
+  bind_rows(.id='timepoint') %>%
+  merge(pelechano_alepuz_tripeptides_freq, by.x='entry', by.y='row.names') %>%
+  pivot_longer(cols=pelechano_alepuz_tripeptides, names_to='tripeptide', values_to='n') %>%
+  mutate(present=n>0) %>%
+  mutate(timepoint=factor(paste0(timepoint, ' hr'), levels=paste0(c(3,6,24), ' hr')))
+
+
+median_effect <- deqms_res_all %>% group_by(timepoint) %>%
+  summarise(median_effect=median(logFC))
+
+p <- deqms_res_all %>%
+  filter(present) %>%
+  ggplot(aes(tripeptide, logFC, group=tripeptide)) +
+  geom_hline(yintercept=0, colour='grey', linetype=2, linewidth=0.5) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_hline(data=median_effect, aes(yintercept=median_effect), colour=get_cat_palette(7)[7]) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans', aspect_square=FALSE) +
+  xlab('') +
+  ylab('Nascent protein\nGC7 vs Control (log2)') +
+  facet_grid(timepoint~.) +
+  coord_cartesian(ylim=c(-2.2,0.7)) +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1, size=8)) +
+  theme(strip.background=element_blank(), aspect.ratio=0.25) +
+  xlab('Pelechano and Alepuz tripeptides')
+
+print(p)
+ggsave(here('figures/plots/Pelechano_Alepuz_tripeptide.pdf'))
+ggsave(here('figures/plots/Pelechano_Alepuz_tripeptide.png'))
+```
+
+
+Just to clarify, the relationship with length seems to be very clear, especially at 6hr!
+```{r}
+
+p <- deqms_fit %>%
+  bind_rows(.id='timepoint') %>%
+  filter(timepoint!='3') %>%
+  mutate(timepoint=factor(timepoint, levels=c(6,24))) %>%
+  merge(aa_count[,'total',drop=FALSE], by.x='entry', by.y='row.names') %>%
+  filter(is.finite(sig)) %>%
+  mutate(binned_length=Hmisc::cut2(total, g=5)) %>%
+  group_by(timepoint, binned_length) %>%
+  summarise(fraction_sig=mean(sig)) %>%
+  ggplot(aes(binned_length, fraction_sig)) +
+  geom_point() +
+  theme_camprot(base_size=15) +
+  theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1)) +
+  xlab('Length (AA)') +
+  ylab('Fraction significant\n(GC7 vs Control)') +
+  facet_wrap(~timepoint, scales='free_y') +
+  ylim(0, NA)
+
+
+print(p)
+
+ggsave(here('notebooks/plots/length_bias.png'))
+ggsave(here('notebooks/plots/length_bias.pdf'))
+
+
+
+```
+OK, so nothing at all obvious regarding expected features.
+
+We'll finish this off with a data driven approach by considering the frequency for all AA, di-AA and tri-AA. We already have the frequency for the AA. 
+```{r}
+aa_counts <- readRDS(here('results/aa_count.rds'))
+aa_freq <- aa_counts[,setdiff(colnames(aa_counts), 'total')] %>% sweep(1, aa_count$total, `/`) %>%
+  mutate(total=log2(aa_count$total))
+
+all_freq <- aa_freq %>%
+  merge(readRDS(here('results/di_freq.rds')), by='row.names') %>%
+  merge(readRDS(here('results/tri_freq.rds')), by.x='Row.names', by.y='row.names') %>%
+  merge((deqms_fit$`6` %>% filter(is.finite(sig)) %>% select(entry, logFC, sig)), by.x='Row.names', by.y='entry') %>%
+  tibble::column_to_rownames('Row.names')
+  
+plot(density(log10(colMeans(select(all_freq, -sig, -logFC)))))
+
+dim(all_freq)
+
+aa_colnames <- colnames(all_freq) %>% setdiff(c('sig', 'logFC'))
+keep_freq <- aa_colnames[log10(colMeans(all_freq[,aa_colnames]))>(-4)]
+all_freq <- all_freq[c(keep_freq, 'sig', 'logFC')]
+
+dim(all_freq)
+head(all_freq$total)
+```
+
+Run elastic net regression
+```{r}
+set.seed(0)
+train <- sample(1:nrow(all_freq), size=nrow(all_freq)*0.8)
+test <- setdiff(1:nrow(all_freq), train)
+mean(all_freq[test, 'sig'])
+mean(all_freq[train, 'sig'])
+sum(all_freq[test, 'sig'])
+sum(all_freq[train, 'sig'])
+print(dim(all_freq))
+```
+Run logistic elastic net regression using sig (<=5% FDR). We'll also encode the tri AA features with one-hot encoding, e.g binary.
+```{r}
+sig <- all_freq[train, 'sig']
+
+features <- all_freq[train,] %>% dplyr::select(-logFC, -sig)
+dim(features)
+set.seed(0)
+nfolds <- 10
+foldid <- sample(rep(seq_len(nfolds), length=nrow(features)))
+alphas <- seq(0, 1, len=11)
+
+tri_to_binary <- intersect(colnames(features), colnames(readRDS(here('results/tri_freq.rds'))))
+length(tri_to_binary)
+features_inc_binary_tri <- features
+features_inc_binary_tri[,tri_to_binary] <- ifelse(features_inc_binary_tri[,tri_to_binary]>0, 1, 0)
+
+```
+
+```{r, eval=FALSE}
+fraction <- table(sig)/length(sig)
+weights <- 1 - fraction[as.character(sig)]
+
+cv.elasticnet_binary <- alphas %>% lapply(function(alpha){
+  cv.glmnet(data.matrix(features_inc_binary_tri),
+            sig,
+            alpha = alpha,
+            family = "binomial",
+            foldid=foldid,
+            trace.it=FALSE,
+            type.measure='class',
+            weights = weights)
+})
+
+cv.elasticnet_binary %>% saveRDS(here('results/cv.elasticnet_binary.rds'))
+```
+
+```{r}
+cv.elasticnet_binary <- readRDS(here('results/cv.elasticnet_binary.rds'))
+```
+
+
+```{r, fig.height=10, fig.width=10}
+par(mfrow = c(4, 3), mar=c(4,4,5.5,1))
+cv.elasticnet_binary %>% lapply(plot)
+```
+
+
+```{r}
+min_cvms <- unlist(lapply(cv.elasticnet_binary, function(x) min(x$cvm))) 
+print(min_cvms)
+plot(min_cvms)
+#best <- which.min(min_cvms)
+best <- 1
+optimal_alpha <- alphas[best]
+optimal_alpha 
+```
+
+
+Truely optimal alpha = 0.7, which is a mixture of ridge regression and lasso regression. However, I'm going to proceed with pure ridge regression because the difference is only slight and I want to explore coefficients for all . 
+
+
+```{r}
+optimal_glmnet_fit <- cv.elasticnet_binary[[best]]
+plot(optimal_glmnet_fit)
+plot(optimal_glmnet_fit$glmnet.fit)
+```
+
+```{r}
+obs <- all_freq[test,'sig']
+
+all_freq_inc_binary_tri <- all_freq
+all_freq_inc_binary_tri[,tri_to_binary] <- ifelse(all_freq_inc_binary_tri[,tri_to_binary]>0, 1, 0)
+
+pred <- predict(optimal_glmnet_fit,
+                newx=(data.matrix(dplyr::select(all_freq_inc_binary_tri[test,], -logFC, -sig))), s='lambda.min', type='response')
+library(pROC)
+rocobj <- roc(obs, as.numeric(pred))
+
+auc <- round(auc(obs, as.numeric(pred)),4)
+
+p <- ggroc(rocobj) +
+  theme_camprot(base_size=15, base_family='sans', border=FALSE) +
+  geom_abline(slope=1, linetype=2, colour='grey', intercept=1) +
+  ggtitle(paste0('ROC ', 'AUC = ', auc))
+
+print(p)
+
+ggsave(here('figures/plots/elastic_net_regression_roc.png'))
+ggsave(here('figures/plots/elastic_net_regression_roc.pdf'))
+```
+
+```{r}
+pred <- predict(optimal_glmnet_fit,
+                newx=(data.matrix(dplyr::select(all_freq_inc_binary_tri[test,], -logFC, -sig))), s='lambda.min', type='class')
+
+table(pred, obs)
+
+cm <- caret::confusionMatrix(factor(as.numeric(pred=='TRUE')), factor(as.numeric(obs)))
+print(cm)
+
+```
+
+
+
+
+
+```{r}
+
+
+coefficients <- coef(optimal_glmnet_fit$glmnet.fit,
+                     s=optimal_glmnet_fit$lambda.min) %>%
+  as.data.frame.matrix() %>%
+  setNames('coef')
+
+non_zero <- coefficients %>% filter(abs(coef)>0)
+coefficients['total',]
+coefficients['PP',]
+print(coefficients %>% arrange(desc(abs(coef))) %>% head(20))
+print(coefficients %>% arrange(desc(coef)) %>% head(20))
+
+
+```
+
+
+
+
+
+```{r}
+coefficients_annot <- coefficients %>%
+  tibble::rownames_to_column('feature') %>%
+  rowwise() %>%
+  filter(!feature %in% c('total', '(Intercept)')) %>%
+  mutate(AA=nchar(feature)) %>%
+  mutate(count_positive=factor(str_count(feature, "(K|R)")),
+         count_negative=factor(str_count(feature, "(D|E)")),
+         count_alipathic=factor(str_count(feature, "(V|I|L)")),
+         count_hydrophobic=factor(str_count(feature, "(A|I|L|M|V|F|W|Y)")),
+         count_polar=factor(str_count(feature, "(Q|S|N|D|E|R)")),
+         count_proline=factor(str_count(feature, "P")))
+
+p <- coefficients_annot %>%
+  ggplot(aes(count_positive, coef, colour=count_positive)) +
+  geom_quasirandom() +
+  geom_boxplot(width=0.25, colour='black', outlier.shape=NA) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans') +
+  geom_hline(yintercept=0, colour='grey', linetype=2) +
+  scale_colour_manual(values=c('grey', get_cat_palette(3)), guide=FALSE) +
+  xlab('Long side-chain positively charged amino acids (K or R)') +
+  ylab('Coefficient') +
+  facet_wrap(~sprintf('AAs: %s', AA),scales='free') +
+  theme(strip.background=element_blank())
+
+print(p)
+ggsave(here('figures/plots/ridge_regression_pos_charge_aa.png'))
+ggsave(here('figures/plots/ridge_regression_pos_charge_aa.pdf'))
+```
+OK, so long-chain amino acids are associated with a greater impact from GC7, especially considering single or di-AA frequency
+
+```{r}
+p2 <- p + aes(count_negative, colour=count_negative) +
+        xlab('Negatively charged amino acids (D or E)')
+print(p2)
+
+ggsave(here('notebooks/plots/ridge_regression_neg_charge_aa.png'), plot=p2)
+ggsave(here('notebooks/plots/ridge_regression_neg_charge_aa.pdf'), plot=p2)
+```
+The trend in the opposite direction (negatively-charged) is less clear, though apparent.
+```{r}
+p2 <- p + aes(count_polar, colour=count_polar) +
+        xlab('Polar & hydrophilic amino acids (Q/S/N/D/E/R)')
+print(p2)
+ggsave(here('notebooks/plots/ridge_regression_polar_aa.png'), plot=p2)
+ggsave(here('notebooks/plots/ridge_regression_polar_aa.pdf'), plot=p2)
+```
+Polar and hydrophilic AA (note this includes neg. charged D & E) are weakly associated with less impact from GC7.
+
+
+```{r}
+p2 <- p + aes(factor(count_hydrophobic, levels=0:4), colour=count_hydrophobic) +
+        xlab('Hydrophobic amino acids (A|I|L|M|V|F|W|Y)')
+print(p2)
+ggsave(here('notebooks/plots/ridge_regression_polar_aa.png'), plot=p2)
+ggsave(here('notebooks/plots/ridge_regression_polar_aa.pdf'), plot=p2)
+```
+
+```{r}
+p2 <- p + aes(count_proline, colour=count_proline) +
+        xlab('Prolines')
+print(p2)
+ggsave(here('notebooks/plots/ridge_regression_prolines.png'), plot=p2)
+ggsave(here('notebooks/plots/ridge_regression_prolines.pdf'), plot=p2)
+```
+Proline is associated with a slightly reduced (!) impact from GC7.
+
+
+
+
+Now, we consider the properties for the proteins for the GO terms of interest
+```{r}
+deqms_fit_annot <- readRDS(here('results/deqms_go_annot.rds'))
+
+
+go_terms <- c("cytosolic_ribosome", "mitochondrial_matrix" )
+
+
+
+to_plot <- deqms_fit_annot$`6` %>%
+  dplyr::select(entry, all_of(go_terms)) %>%
+  pivot_longer(col=-entry, names_to='GO_term', values_to='Present') %>%
+  filter(Present) %>%
+  merge(deqms_fit_annot$`6`[,c('entry', 'sca.adj.pval', 'logFC')], by='entry', all.y=TRUE) %>%
+  merge(aa_count[deqms_fit_annot$`6`$entry, c('K','R','total'), drop=FALSE], by.x='entry', by.y='row.names') %>%
+  mutate(GO_term=factor(ifelse(is.na(GO_term), 'Other', gsub('_', ' ', GO_term)),
+                      levels=c(gsub('_', ' ', go_terms), 'Other'))) %>%
+  mutate(freq_long_chain_pos=(K+R)/total)
+
+p <- to_plot %>%
+  filter(!is.na(sca.adj.pval)) %>%
+  ggplot(aes(GO_term, freq_long_chain_pos,
+             colour=sca.adj.pval<0.05,
+             group=interaction(sca.adj.pval<0.05, GO_term))) +
+  geom_quasirandom(dodge.width=0.5, size=0.25) +
+  stat_summary(geom='errorbar', position=position_dodge(width=0.5), width=0.4, colour='black',
+               fun.args=list(mult=1.96)) +
+  #geom_boxplot(outlier.shape = NA, notch=TRUE, position=position_dodge(width=0.5), width=0.1, colour='black')  +
+  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
+  scale_colour_manual(values=get_cat_palette(2), name='Significantly\naffected by GC7\nat 6 hr') +
+  theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1)) +
+  xlab('') +
+  ylab('Long-chain positively\n charged AA frequency')
+
+print(p)
+ggsave(here('figures/plots/GO_term_vs_freq_pos_charged_AA.png'))
+ggsave(here('figures/plots/GO_term_vs_freq_pos_charged_AA.pdf'))
+
+
+
+  
+```
+
+
+
+
+
+```{r}
+to_plot_kr_freq_all <- to_plot %>%
+  merge(aa_count[, c('K','R','total')], by.x='entry', by.y='row.names') %>%
+  mutate(freq_long_chain_pos=(K+R)/total)
+
+p <- to_plot_kr_freq_all %>%
+  filter(!is.na(sca.adj.pval)) %>%
+  ggplot(aes(freq_long_chain_pos, logFC)) +
+  geom_point(alpha=0.1, size=0.1) +
+  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
+  scale_colour_manual(values=get_cat_palette(3), name='') +
+  theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1)) +
+  ylab('GC7 vs control (log2)') +
+  xlab('Long-chain positively\n charged AA frequency') +
+  geom_smooth(colour=get_cat_palette(1)) +
+  facet_grid((gsub(' ', '\n', GO_term))~timepoint) +
+  theme(strip.background=element_blank())
+
+print(p)
+ggsave(here('figures/plots/pos_charged_AA_vs_GC7_impact_GO_term_split.png'))
+ggsave(here('figures/plots/pos_charged_AA_vs_GC7_impact_GO_term_split.pdf'))
+```
+
+

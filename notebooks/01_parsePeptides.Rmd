@@ -21,7 +21,8 @@ fontsize: 11pt
 #### Load packages ####
 suppressMessages(library(camprotR))
 suppressMessages(library(ggplot2))
-suppressMessages(library(tidyverse))
+suppressMessages(library(tidyr))
+suppressMessages(library(dplyr))
 suppressMessages(library(MSnbase))
 #library(ggbeeswarm)
 #library(GO.db)

@@ -1,0 +1,403 @@
+---
+title: "GO over-representation"
+author:
+  - name: "Tom Smith"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: |
+  Identify over-represented GO terms, including bias factor (polypeptide length)
+output:
+  pdf_document: default
+  html_notebook: default
+---
+```{r}
+suppressMessages(library(goseq))
+suppressMessages(library(tidyr))
+suppressMessages(library(dplyr))
+suppressMessages(library(ggrepel))
+suppressMessages(library(camprotR))
+suppressMessages(library(here))
+suppressMessages(library(ggbeeswarm))
+```
+
+Read in objects from previous notebooks
+```{r}
+deqms_fit <-  readRDS(here('results/deqms.rds'))
+go_all <- readRDS(here('results/go_all.rds'))
+```
+
+Start with the 6hr data
+```{r}
+deqms_res <- deqms_fit$`6` %>% filter(is.finite(sig))
+
+# booleon for significant Y/N
+DEproteins <- as.numeric(deqms_res$sig)
+sum(DEproteins)
+length(DEproteins)
+mean(DEproteins)
+names(DEproteins) <- deqms_res$entry
+print(table(DEproteins))
+
+# bias factor. We'll start with the min number of PSMs per protein
+bias <- deqms_res$count
+names(bias) <- deqms_res$entry
+
+pwf <- goseq::nullp(DEproteins, bias.data=bias)
+
+```
+No clear relationship, so we can proceed with hypergeometric test
+
+
+
+```{r}
+over_rep_go <- goseq::goseq(pwf, gene2cat=go_all[,c('UNIPROTKB', 'GO_ID')], method='Hypergeometric') %>%
+  mutate(fdr=p.adjust(over_represented_pvalue, method='BH'))
+
+over_rep_go %>%
+  filter(fdr<0.01, numDEInCat>10) %>%
+  camprotR::remove_redundant_go() %>%
+  estimate_go_overrep((pwf %>% mutate(pwf=1)), go_all[,c('UNIPROTKB', 'GO_ID')])
+
+over_rep_go_flt <- over_rep_go %>%
+  filter(fdr<0.01, numDEInCat>10) %>%
+  camprotR::remove_redundant_go() %>%
+  estimate_go_overrep((pwf %>% mutate(pwf=1)), go_all[,c('UNIPROTKB', 'GO_ID')])
+
+print(over_rep_go_flt)
+```
+
+OK, so just a few terms significantly over-represented here.
+
+Localisation-wise, Mitochondrial matrix (3.07-fold)
+Function-wise, cytosolic ribosome (4.81-fold), 'energy derivation by oxidation of organic compounds' (3.49-fold)
+
+
+Many of these are short proteins, especially the ribosomal ones. Is there any chance that's all we're seeing? We can test this by using the protein length as the bias factor...
+
+```{r}
+aa_count <- readRDS(here('results/aa_count.rds'))
+
+bias_length <- aa_count[deqms_res$entry, 'total']
+names(bias_length) <- deqms_res$entry
+
+pwf_length <- goseq::nullp(DEproteins, bias.data=bias_length)
+```
+OK, so that's a clear relationship!!
+
+```{r}
+saveRDS(over_rep_go, here('results/over_rep_go.rds'))
+saveRDS(over_rep_go_length, here('results/over_rep_go_length.rds'))
+
+
+```
+
+```{r, fig.height=4, fig.width=9}
+p <- over_rep_go_flt %>%
+  arrange(adj_overrep) %>%
+  mutate(term=factor(term, levels=unique(term))) %>%
+  ggplot(aes(adj_overrep, term, fill=-log10(fdr))) +
+  geom_bar(stat='identity') +
+  facet_grid(ontology~., space='free', scales='free_y')+
+  theme_camprot(base_size=15, border=FALSE, aspect_square=FALSE, base_family='sans') +
+  scale_fill_continuous(low='grey90', high=get_cat_palette(1), name='-log10\np-value') +
+  theme(strip.background=element_blank(),
+        axis.text.y=element_text(size=15)) +
+  ylab('') +
+  xlab('Over-representation')
+
+print(p)
+ggsave(here('figures/plots/GO_over_rep_6hr.png'))
+ggsave(here('figures/plots/GO_over_rep_6hr.pdf'))
+```
+
+```{r}
+ss_go <- 'GO:0022627' 
+ls_go <- 'GO:0022625'
+ribo_struc <- 'GO:0003735'
+cyt_ribo <- 'GO:0022626'
+
+cyt_ribo_subunits <- go_all %>% filter(GO_ID %in% c(ss_go, ls_go, ribo_struc, cyt_ribo)) %>% select(UNIPROTKB, GO_ID) %>%
+  unique() %>%
+  group_by(UNIPROTKB) %>%
+  tally() %>%
+  filter(n==3) %>%
+  pull(UNIPROTKB)
+
+```
+
+
+```{r}
+
+deqms_fit_annot <- deqms_fit
+# These two terms capture the localisation of the protein
+go_terms_of_interest <- c('cytosolic ribosome', 'mitochondrial matrix')
+
+for(term in go_terms_of_interest){
+  proteins_in_term <- go_all %>% filter(TERM==term) %>% pull(UNIPROTKB)
+  print(c(term, length(proteins_in_term)))
+  deqms_fit_annot <- deqms_fit_annot %>% lapply(function(x){
+    x[[gsub(' ', '_', term)]] <- x$entry %in% proteins_in_term
+    return(x)
+  })
+}
+
+deqms_fit_annot <- deqms_fit_annot %>% lapply(function(x){
+    x[['cytosolic_ribosome_subunit']] <- x$entry %in% cyt_ribo_subunits
+    return(x)
+  })
+
+deqms_fit_annot <- deqms_fit_annot %>% lapply(function(x){
+    x[['cytosolic_ribosome_other']] <- (x[['cytosolic_ribosome']] & !x[['cytosolic_ribosome_subunit']])
+    return(x)
+  })
+
+
+deqms_fit_annot %>% saveRDS(here('results/deqms_go_annot.rds'))
+
+
+```
+
+```{r}
+
+go_terms <- gsub(' ', '_', go_terms_of_interest)
+
+to_plot <- deqms_fit_annot$`6` %>%
+  select(entry, all_of(go_terms)) %>%
+  pivot_longer(col=-entry, names_to='GO_term', values_to='Present') %>%
+  filter(Present) %>%
+  merge(deqms_fit_annot$`6`[,c('entry', 'sca.adj.pval', 'logFC')], by='entry', all.y=TRUE) %>%
+  merge(aa_count[deqms_fit_annot$`6`$entry, 'total', drop=FALSE], by.x='entry', by.y='row.names') %>%
+  mutate(GO_term=factor(ifelse(is.na(GO_term), 'Other', gsub('_', ' ', GO_term)),
+                      levels=c(gsub('_', ' ', go_terms), 'Other')))
+p <- to_plot %>%
+  filter(!is.na(sca.adj.pval)) %>%
+  ggplot(aes(GO_term, log2(total),
+             colour=sca.adj.pval<0.05,
+             group=interaction(sca.adj.pval<0.05, GO_term))) +
+  geom_quasirandom(dodge.width=0.5, size=0.25) +
+  stat_summary(geom='errorbar', position=position_dodge(width=0.5), width=0.4, colour='black',
+               fun.args=list(mult=1.96)) +
+  #geom_boxplot(outlier.shape = NA, notch=TRUE, position=position_dodge(width=0.5), width=0.1, colour='black')  +
+  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
+  scale_colour_manual(values=get_cat_palette(2), name='Significantly\naffected by GC7') +
+  theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1)) +
+  xlab('') +
+  ylab('Polypeptide length (log2)')
+
+print(p)
+ggsave(here('notebooks/plots/polypeptide_length.png'))
+ggsave(here('notebooks/plots/polypeptide_length.pdf'))
+```
+
+
+```{r, fig.width=8, fig.height=8}
+to_plot_ecdf <- deqms_fit_annot %>% names() %>% lapply(function(timepoint){
+  
+  deqms_fit_annot[[timepoint]] %>%
+    select(entry, all_of(go_terms)) %>%
+    pivot_longer(col=-entry, names_to='GO_term', values_to='Present') %>%
+    filter(Present) %>%
+    merge(deqms_fit_annot[[timepoint]][,c('entry', 'sca.adj.pval', 'logFC')], by='entry', all.y=TRUE) %>%
+    merge(aa_count[deqms_fit_annot[[timepoint]]$entry, 'total', drop=FALSE], by.x='entry', by.y='row.names') %>%
+    mutate(GO_term=factor(ifelse(is.na(GO_term), 'Other', gsub('_', ' ', GO_term)),
+                        levels=c(gsub('_', ' ', go_terms), 'Other'))) %>%
+    mutate(time=timepoint) %>%
+    mutate(Present=replace_na(Present, FALSE))
+})
+
+to_plot_ecdf %>%
+  bind_rows() %>%
+  filter(GO_term %in% c('cytosolic ribosome subunit', 'mitochondrial matrix', 'Other')) %>%
+  group_by(time, GO_term) %>%
+  tally()
+to_plot_ecdf %>%
+  bind_rows() %>%
+  group_by(GO_term) %>% tally()
+
+p <- to_plot_ecdf %>%
+  bind_rows() %>%
+  filter(GO_term %in% c('cytosolic ribosome subunit','mitochondrial matrix', 'Other')) %>%
+  mutate(time=factor(sprintf('%s hr', time), levels=c('3 hr','6 hr','24 hr'))) %>%
+  ggplot(aes(logFC, as.numeric(Present), colour=GO_term)) +
+  stat_ecdf() +
+  facet_wrap(~time, ncol=1, scales='free') +
+  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
+  scale_colour_manual(values=c(get_cat_palette(7)[c(2,5)], 'black'), name='GO term') +
+  xlab('Nascent protein\nGC7 vs Control (log2)') +
+  ylab('Fraction of data') +
+  theme(strip.background=element_blank()) +
+  geom_vline(xintercept=0, linetype=2, colour='grey')
+
+print(p)
+ggsave(here('figures/plots/ribo_vs_mt_timing_ecdf.png'))
+ggsave(here('figures/plots/ribo_vs_mt_timing_ecdf.pdf'))
+```
+
+
+```{r}
+mitocarta <- suppressWarnings(readxl::read_excel(here('external/MitoCarta/Human.MitoCarta3.0.xls'), sheet=2))
+```
+
+
+
+```{r, fig.width=8, fig.height=8}
+to_plot_ecdf_mitocarta <- deqms_fit %>% bind_rows(.id='time') %>%
+  merge(mitocarta[,c('UniProt', 'MitoCarta3.0_SubMitoLocalization', 'MitoCarta3.0_MitoPathways', 'HPA_Main_Location_2020 (Reliability)', 'TargetP_Score', 'MitoCarta3.0_Evidence')],
+        by.x='entry', by.y='UniProt', all.x=TRUE) %>%
+  filter(grepl('Mito', `HPA_Main_Location_2020 (Reliability)`) | is.na(MitoCarta3.0_SubMitoLocalization))
+
+to_plot_ecdf_mitocarta$mit_loc <- ifelse(is.na(to_plot_ecdf_mitocarta$MitoCarta3.0_SubMitoLocalization),
+                                         'Not Mt.',  to_plot_ecdf_mitocarta$MitoCarta3.0_SubMitoLocalization)
+remove_mitocarta_loc <- names(table(to_plot_ecdf_mitocarta$mit_loc)[table(to_plot_ecdf_mitocarta$mit_loc)<10])
+
+p <- to_plot_ecdf_mitocarta %>%
+  filter(!mit_loc %in% remove_mitocarta_loc) %>%
+  mutate(time=factor(sprintf('%s hr', time), levels=c('3 hr','6 hr','24 hr'))) %>%
+  ggplot(aes(logFC, 1, colour=mit_loc)) +
+  stat_ecdf() +
+  facet_wrap(~time, scales='free', ncol=2) +
+  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
+  scale_colour_manual(values=c(get_cat_palette(4), 'grey35'), name='Mitocarta\nlocalisation') +
+  xlab('Nascent protein\nGC7 vs Control (log2)') +
+  ylab('Fraction of data') +
+  theme(strip.background=element_blank(), legend.position=c(0.85,0.25)) +
+  geom_vline(xintercept=0, linetype=2, colour='grey')
+
+print(p)
+ggsave(here('figures/plots/mt_loc_vs_timing_ecdf.png'))
+ggsave(here('figures/plots/mt_loc_vs_timing_ecdf.pdf'))
+```
+
+
+
+
+
+
+
+```{r}
+write.table(to_plot_ecdf_mitocarta,
+            file=here('results/for_ecdf_plot_mitocarta.tsv'),
+            sep='\t',
+            quote=FALSE,
+            row.names=FALSE)
+
+```
+
+
+
+
+
+
+```{r}
+apply_ks_test_to_data <- function(obj, go_term1, go_term2='Other'){
+  go_term_dist <- obj %>% filter(GO_term==go_term1) %>% pull(logFC)
+  other_dist <- obj %>% filter(GO_term==go_term2) %>% pull(logFC)
+  ks.test(go_term_dist, other_dist)
+}
+
+mt_other <- to_plot_ecdf %>%
+  bind_rows() %>%
+  group_by(time) %>%
+  group_modify(~ broom::tidy(apply_ks_test_to_data(., "mitochondrial matrix"))) %>%
+  mutate(comparison='Mt vs Other')
+            
+ribo_other <- to_plot_ecdf %>%
+  bind_rows() %>%
+  group_by(time) %>%
+  group_modify(~ broom::tidy(apply_ks_test_to_data(., "cytosolic ribosome subunit"))) %>%
+  mutate(comparison='Ribo vs Other')
+
+mt_ribo <- to_plot_ecdf %>%
+  bind_rows() %>%
+  group_by(time) %>%
+  group_modify(~ broom::tidy(apply_ks_test_to_data(., "mitochondrial matrix", "cytosolic ribosome subunit"))) %>%
+  mutate(comparison='Mt vs Ribo')
+
+
+ks_results <- bind_rows(mt_other, ribo_other, mt_ribo) %>%
+  ungroup() %>%
+  mutate(fdr=p.adjust(p.value, method='BH')) %>%
+  mutate(time=as.numeric(time)) %>%
+  arrange(time, comparison)
+
+print(ks_results)
+saveRDS(ks_results, here('results/logFC_ks_results.rds'))
+```
+
+
+```{r}
+apply_ks_test_sub_mito <- function(obj, mito_loc_oi, mito_loc_comp=c('Not Mt.')){
+  
+  mim_loc_dist <- obj %>% filter(mit_loc==mito_loc_oi) %>% pull(logFC)
+  other_dist <- obj %>% filter(mit_loc %in% mito_loc_comp) %>% pull(logFC)
+  ks.test(mim_loc_dist, other_dist)
+}
+
+ks_results_sub_mito <- list('Matrix', 'MOM', 'MIM', 'IMS') %>%
+  lapply(function(mito_loc_oi){
+
+  to_plot_ecdf_mitocarta %>%
+      group_by(time) %>%
+      group_modify(~ broom::tidy(apply_ks_test_sub_mito(., mito_loc_oi))) %>%
+      mutate(comparison=sprintf('%s vs Non-Mitochondrial', mito_loc_oi))
+    
+  }) %>%
+  bind_rows() %>%
+  mutate(padj=p.adjust(p.value, method='BH')) %>%
+  mutate(sig=padj<0.05) %>%
+  arrange(p.value)
+
+print(ks_results_sub_mito)
+saveRDS(ks_results_sub_mito, here('results/logFC_ks_results_sub_mito.rds'))
+
+
+ks_results_sub_mito_vs_mom_mim <- list('Matrix', 'MIM') %>%
+  lapply(function(mito_loc_oi){
+
+  to_plot_ecdf_mitocarta %>%
+      group_by(time) %>%
+      group_modify(~ broom::tidy(apply_ks_test_sub_mito(., mito_loc_oi, c('MOM', 'IMS')))) %>%
+      mutate(comparison=sprintf('%s vs MOM/IMS', mito_loc_oi))
+    
+  }) %>%
+  bind_rows() %>%
+  mutate(padj=p.adjust(p.value, method='BH')) %>%
+  mutate(sig=padj<0.05) %>%
+  arrange(p.value)
+
+print(ks_results_sub_mito_vs_mom_mim)
+
+```
+
+Let's repeat the steps above but for the 24 hr timepoint. We'll use the `sig_conf` set, since basically all proteins are significantly lower in GC7 at 24hr!
+```{r}
+
+
+deqms_res <- deqms_fit$`24` %>% filter(is.finite(sig_conf))
+
+DEproteins <- as.numeric(deqms_res$sig_conf)
+names(DEproteins) <- deqms_res$entry
+
+bias_length <- aa_count[deqms_res$entry, 'total']
+names(bias_length) <- deqms_res$entry
+
+pwf <- goseq::nullp(DEproteins, bias.data=bias_length)
+
+# A slight relationship observed this time, so hypergeometric not suitable
+over_rep_go_24hr <- goseq::goseq(pwf, gene2cat=go_all[,c('UNIPROTKB', 'GO_ID')]) %>%
+  mutate(fdr=p.adjust(over_represented_pvalue, method='BH'))
+
+print(head(over_rep_go_24hr))
+
+over_rep_go_24hr_flt <- over_rep_go_24hr %>%
+  filter(fdr<0.1) %>%
+  camprotR::remove_redundant_go() %>%
+  estimate_go_overrep(pwf, go_all[,c('UNIPROTKB', 'GO_ID')])
+
+print(over_rep_go_24hr_flt)
+```
+Basically, all proteins are affected at 24hr, as we would expect, so little clear functional over-representation.
+
+
+
+

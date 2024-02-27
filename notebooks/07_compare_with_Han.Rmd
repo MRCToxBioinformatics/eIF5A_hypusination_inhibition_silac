@@ -1,0 +1,159 @@
+---
+title: "Compare with Han et al"
+author:
+  - name: "Tom Smith"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: |
+  Han et al (2020) used ribosome profiling to determine the effect of eIF5A KD on
+  ribosome collisions (disomes). Here, we consider how their eIF5A-sensitive sites
+  related to our changes in protein abundance. There doesn't appear to be any agreement
+  between the proteins with increased disome pausing upon eIF5A KD and decreased
+  nascent protein upon GC7.
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+```{r}
+suppressMessages(library(goseq))
+suppressMessages(library(tidyr))
+suppressMessages(library(dplyr))
+suppressMessages(library(camprotR))
+suppressMessages(library(glmnet))
+suppressMessages(library(here))
+suppressMessages(library(ggbeeswarm))
+suppressMessages(library(uniprotREST))
+```
+Read in our results
+```{r}
+deqms_fit <-  readRDS(here('results/deqms.rds'))
+```
+
+Read in Han et al Table S3, which describes all sites with increase disome pausing upon eIF5A KD.
+```{r}
+Han <- read.delim(here('external/Han_et_al_Cell_Reports_2020/Table_S3.csv'), sep=',')
+Han %>% arrange(pause_score_5Ai-pause_score_Ctrl) %>% head()
+
+Han_pause_sites <- read.delim(here('external/Han_et_al_Cell_Reports_2020/Table_S1.csv'), sep=',')
+
+```
+
+Get the uniprot ID
+```{r}
+
+gene2uniprot <- uniprotREST::uniprot_map(
+  ids = unique(Han$gene),
+  from = "Gene_Name",
+  to = "UniProtKB-Swiss-Prot",
+  fields = c("accession", "gene_names", "reviewed")
+)
+
+gene2uniprot_pause_sites <- uniprotREST::uniprot_map(
+  ids = unique(Han_pause_sites$gene),
+  from = "Gene_Name",
+  to = "UniProtKB-Swiss-Prot",
+  fields = c("accession", "gene_names", "reviewed")
+)
+
+```
+
+Checking none of the gene ids are mapped to multiple uniprot IDs
+```{r}
+gene2uniprot %>% merge(deqms_fit$`3`, by.y='entry', by.x='Entry') %>%
+  group_by(From) %>% tally() %>%
+  arrange(desc(n)) %>% filter(n>1) 
+
+gene2uniprot_pause_sites %>% merge(deqms_fit$`3`, by.y='entry', by.x='Entry') %>%
+  group_by(From) %>% tally() %>%
+  arrange(desc(n)) %>% filter(n>1) 
+```
+OK, so a handle of genes have multiple matches to gene names. We can live with that.
+
+
+Plotting the effect of GC7 on nascent proteins for +/- disome pausing
+```{r}
+to_plot <- deqms_fit %>% bind_rows(.id='timepoint') %>%
+  mutate(timepoint =factor(timepoint, levels=c(3,6,24)),
+         Han=entry %in% gene2uniprot$Entry)
+
+p <- to_plot %>%
+  ggplot(aes(timepoint, logFC, colour=Han, group=Han)) +
+  geom_quasirandom(dodge.width=0.5) +
+  stat_summary(fun.max='median', fun.min='median', geom='errorbar', colour='black', position=position_dodge(width=0.5), width=0.25) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans') +
+  xlab('Time (h)') +
+  ylab('Nascent protein in GC7 vs Control (log2)') +
+  scale_colour_manual(values=c('grey', get_cat_palette(2)[2]), name='Increased disome\npausing upon\neIF5A KD')
+
+print(p)
+ggsave(here('figures/plots/Han_et_al_disome_pausing.png'))
+ggsave(here('figures/plots/Han_et_al_disome_pausing.pdf'))
+
+to_plot %>%
+  ggplot(aes(logFC, colour=Han, group=Han)) +
+  stat_ecdf() +
+  facet_wrap(~timepoint) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans') +
+  ylab('Fraction of data') +
+  xlab('Nascent protein in GC7 vs Control (log2)') +
+  scale_colour_manual(values=c('grey20', get_cat_palette(2)[2]), name='Increased disome pausing\nHan et al (2020)')  +
+  theme(strip.background=element_blank())
+
+```
+
+Plotting the effect of GC7 on nascent proteins for +/- increased disome pausing upon eIF5A KD.
+```{r}
+to_plot <- deqms_fit %>% bind_rows(.id='timepoint') %>%
+  mutate(timepoint =factor(timepoint, levels=c(3,6,24)),
+         Han=entry %in% gene2uniprot_pause_sites$Entry)
+
+to_plot %>%
+  ggplot(aes(timepoint, logFC, colour=Han, group=Han)) +
+  geom_quasirandom(dodge.width=0.5) +
+  stat_summary(fun.max='median', fun.min='median', geom='errorbar', colour='black', position=position_dodge(width=0.5), width=0.25) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans') +
+  xlab('Time (h)') +
+  ylab('Nascent protein in GC7 vs Control (log2)') +
+  scale_colour_manual(values=c('grey', get_cat_palette(2)[2]), name='Disome pausing\nHan et al (2020)')
+  
+
+to_plot %>%
+  ggplot(aes(logFC, colour=Han, group=Han)) +
+  stat_ecdf() +
+  facet_wrap(~timepoint) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans') +
+  ylab('Fraction of data') +
+  xlab('Nascent protein in GC7 vs Control (log2)') +
+  scale_colour_manual(values=c('grey20', get_cat_palette(2)[2]), name='Disome pausing\nHan et al (2020)')  +
+  theme(strip.background=element_blank())
+
+```
+OK, so absolutely no difference between the nascent protein with GC7 for proteins whose RNA shows increased disome pausing upon eIF5A KD (Han et al 2020)).
+
+Final sanity check -  what about if we consider the number of sites detected?... Still no difference.
+
+```{r}
+
+Han_tally <- Han %>% group_by(gene) %>% tally(name='sites')
+
+
+deqms_fit %>% bind_rows(.id='timepoint') %>%
+  mutate(timepoint=factor(timepoint, levels=c(3,6,24))) %>%
+  merge((Han_tally %>% merge(gene2uniprot, by.y='From', by.x='gene')), by.x='entry', by.y='Entry', all.x=TRUE) %>%
+  mutate(sites=replace_na(sites, 0)) %>%
+  ggplot(aes(timepoint, logFC, colour=sites, group=sites)) +
+  geom_quasirandom(dodge.width=0.5) +
+  stat_summary(fun.max='median', fun.min='median', geom='errorbar', colour='black', position=position_dodge(width=0.5), width=0.25) +
+  theme_camprot(border=FALSE, base_size=15, base_family='sans') +
+  xlab('Time (h)') +
+  ylab('Nascent protein in GC7 vs Control (log2)') +
+  scale_colour_continuous(low='grey', high=get_cat_palette(2)[2],
+                          name='# increased disome\npausing sites\nHan et al (2020)')
+  
+
+
+
+```
+

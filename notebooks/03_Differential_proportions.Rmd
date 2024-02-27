@@ -1,0 +1,257 @@
+---
+title: "Statistical Analyses"
+author:
+  - name: "Tom Smith"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: | 
+  Identification of significantly different proportions
+output:
+  pdf_document:
+  html_notebook: default
+geometry: margin=1in
+fontfamily: mathpazo
+fontsize: 11pt
+---
+
+
+Statistically determine proteins that change between the conditions. After
+considering the options, I'm going to simply model the H/L ratio for GC7
+inhibited vs untreated at the each timepoint. This will allow us to identify the
+proteins most affected by GC7 inhibition, after which we can trace back and see 
+how these are affected in the earlier timepoints.
+
+The other options for modeling were rejected for the following reasons:
+
+- Proportions rather than H/L. I'm not certain what the expected distribution is
+for the difference between proportions, whereas for the difference between (log) ratios,
+it should be approximately Gaussian. Post statistical testing, we can express the difference
+as proportions if desired. Also, the difference in ratios is equivalent
+the difference in the amount of nascent protein, so it's easy to interpret.
+
+- Modeling all timepoints together. Intuitively, this might seem more appropriate,
+however, the statistical test then needs to be either:
+
+  1. treated vs untrt in all timepoints together (ratio ~ timepoint + condition,
+  interested in condition coefficient), or
+  2. the specific effect at one timepoint vs the other timepoints.
+  (ratio ~ timepoint + condition + timepoint:condition,
+  interested in contrasts for timepoint:condition interaction coefficient, e.g 24hr vs 3hr)
+
+Options 1 is testing the hypothesis that treatment has an effect independent of timepoint, whereas option 2 is testing for a timepoint-dependent effect. Neither of these is what we are actually interested in, at least initially.
+
+```{r}
+suppressMessages(library(tidyr))
+suppressMessages(library(dplyr))
+suppressMessages(library(biobroom))
+suppressMessages(library(MSnbase))
+suppressMessages(library(camprotR))
+suppressMessages(library(limma))
+suppressMessages(library(here))
+
+# Standardise plotting aesthetics
+source(here('R/plotting.R'))
+
+select <- dplyr::select
+```
+
+```{r}
+proportions <- readRDS(here("results/prot_proportion.rds"))
+```
+
+```{r}
+log2_ratios <- proportions 
+exprs(log2_ratios) <- log2(exprs(log2_ratios)/(1-exprs(log2_ratios)))
+```
+
+Below, we create objects containing the data for proteins with data from at least 2 replicates in both conditions for a given timepoint.
+```{r}
+
+complete_data_per_timepoint <- unique(log2_ratios$type) %>% lapply(function(timepoint){
+  all_data <- tidy(log2_ratios, addPheno=TRUE) %>%
+    filter(is.finite(value), type==timepoint) %>%
+    mutate(condition=factor(condition, levels=c('untrt', 'GC7')))
+
+  min_dup <- all_data %>% group_by(protein, type, condition) %>% tally() %>% filter(n>1)
+  
+  all_data_min_dup <- all_data %>% merge(min_dup, by=c('protein', 'type', 'condition'))
+  
+  all_conditions <- all_data_min_dup %>% select(protein, type, condition) %>% distinct() %>% group_by(protein) %>% tally() %>% filter(n==2)
+  
+  all_data_min_dup_complete_all <- all_data_min_dup %>% filter(protein %in% all_conditions$protein)
+
+  all_data_min_dup_complete_all
+})
+
+names(complete_data_per_timepoint) <- unique(log2_ratios$type)
+
+  
+```
+
+Now, we fit a linear model of ratio (`value`) ~ condition for each protein separately and pull out the coefficient point estimate and p-value for condition GC7 inhibition vs untrt. Finally, we identify the proteins with significant change (FDR<0.05, fold-change > 2 (log2 scale so threshold below is 1))
+```{r}
+complete_data_timepoint_all_fits <- complete_data_per_timepoint %>%
+  lapply(function(timepoint){
+      timepoint %>%
+        group_by(protein) %>% 
+        group_modify(~tidy(lm(formula=value~condition+replicate, data = .)))
+  })
+
+
+lm_differences <- complete_data_timepoint_all_fits %>% lapply(function(timepoint){
+    timepoint %>% ungroup() %>% filter(term=='conditionGC7') %>% mutate(fdr=p.adjust(p.value, method='BH')) %>%
+      arrange(p.value)
+  })
+  
+highlight_lm <- lm_differences %>% lapply(function(timepoint){
+    timepoint %>% filter(abs(estimate)>1, fdr<0.05) %>% pull(protein)
+  })
+
+highlight_lm %>% lapply(length)
+
+```
+
+Below, we tally the number of proteins per cell line with complete data and how many are significantly affected by treatment. Amazingly, nearly half of the proteins are affected at 24hr(!), but none before that. Note, all these changes are decreases, though we didn't stipulate this in the testing. 
+
+Given that we have a general translation shut down starting from ~6hr, it's likely that the observations at 24hr are largely driven by this rather than from the more specific GC7 inhibition. We would therefore like to identify the changes at 3hr and 6hr if possible.
+
+The above is just using a standard linear model, but we can go one step further and use DEqMS, which extends limma for use in proteomics. limma was originally designed for microarrays but can be used for any Gaussian distributed quantification data with small n, where one expects there to be a relationship between abundance and variance, which can then be used to share information between features of similar abundance and more accurately estimate their true variance. DEqMS extends limma by allowing the relationship to be with the number of peptides per protein, which is more appropriate for proteomics.
+
+We start by preparing the data as we would for limma, using the `ExpressionSet` object. Since the `MSnSet` object is built upon the same structure, we can then use the `pData` and `fData` from our proportions MSnSet and add this onto the object for limma
+
+```{r}
+for_limma <- complete_data_per_timepoint %>% lapply(function(timepoint){
+      eset <- timepoint %>%
+      select(protein, sample, value) %>%
+      pivot_wider(names_from='sample', values_from='value') %>%
+      tibble::column_to_rownames('protein') %>%
+      as.matrix() %>%
+      ExpressionSet()
+      
+      pData(eset) <- pData(proportions)[colnames(eset),]
+      fData(eset) <- fData(proportions)[rownames(eset),]
+      
+      return(eset)
+  })
+
+
+names(for_limma) <- names(complete_data_per_timepoint)
+
+```
+
+
+Next, we tally the peptides per protein
+```{r}
+
+peptides <- readRDS(here('results/pep_proportion.rds'))
+
+peptides_per_protein <- camprotR::count_features_per_protein(
+  peptides, master_prot_col='Updated.Master.Protein.Accessions')
+
+# we need the minimum number of peptides per protein across the samples being modeled,
+# so we merge with the complete data to subset to these samples.
+min_peptides_per_protein <- complete_data_per_timepoint %>%
+  lapply(function(timepoint){
+    x <- merge(peptides_per_protein,
+               timepoint[,c('sample', 'protein'),],
+               by.x=c('sample', 'Updated.Master.Protein.Accessions'),
+               by.y=c('sample', 'protein'))
+    x %>% group_by(Updated.Master.Protein.Accessions) %>%
+      summarise('min_pep_per_protein'=min(n),
+                'mean_pep_per_protein'=mean(n)) %>%
+      tibble::column_to_rownames('Updated.Master.Protein.Accessions')
+    })
+
+```
+
+```{r}
+
+limma_fit <- for_limma %>% lapply(function(timepoint){
+    condition <- factor(timepoint$condition, # will use the condition column in pData
+                        levels=c('untrt', 'GC7')) 
+    replicate <- timepoint$replicate
+    design <- model.matrix(~replicate+condition)
+    print(design)
+  
+    lmFit(timepoint, design) %>% eBayes()
+})
+
+```
+```{r}
+deqms_fit <- limma_fit %>% names() %>% lapply(function(timepoint){
+
+    lmfit <- limma_fit[[timepoint]]
+  
+    lmfit$count <- min_peptides_per_protein[[timepoint]][rownames(lmfit$coefficients),'min_pep_per_protein']
+    
+    deq_fit <- DEqMS::spectraCounteBayes(lmfit)
+    
+    DEqMS::VarianceBoxplot(deq_fit, n = 30, xlab = "Peptide count")
+  
+    deq_fit <- deq_fit %>% DEqMS::outputResult(coef_col = 4) %>% 
+      select(-gene) %>%
+      tibble::rownames_to_column("entry") %>% 
+      mutate(sig_conf = (abs(logFC)>1 & sca.adj.pval < 0.05),
+             sig = (sca.adj.pval < 0.05))
+    
+    return(deq_fit)
+    })
+
+names(deqms_fit) <- names(limma_fit)
+
+```
+
+OK, so there is a weak trend for higher variance in the ratio estimates when the minimum number of peptides across the samples is lower. 
+
+
+
+Let's inspect the number of significant difference (with fold-change > 2). Now we have slightly more.
+```{r}
+deqms_fit %>% lapply(function(x) table(x$sig_conf))
+deqms_fit %>% lapply(function(x) table(x$sig, x$logFC<0))
+```
+Great, so with DEqMS, we can also detect some significant differences at 6hr.
+
+
+Now, let's visualise these proteins...
+
+```{r, fig.height=6, fig.width=3}
+
+p <- deqms_fit %>%
+  names() %>%
+  lapply(function(time){
+    deqms_fit[[time]] %>%
+      mutate(timepoint=time)
+  }) %>%
+  bind_rows() %>%
+  arrange(as.numeric(timepoint)) %>%
+  mutate(timepoint=sprintf('%s hr', timepoint)) %>%
+  mutate(timepoint=factor(timepoint, levels=unique(timepoint))) %>%
+  filter(is.finite(sig)) %>%
+  ggplot(aes(logFC, -log10(sca.P.Value), colour=sig)) +
+  geom_point(size=0.25) +
+  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
+  scale_colour_manual(values=c('grey', get_cat_palette(1)), labels=c('', 'Sig. difference\n(FDR < 5%)')) +
+  xlab('GC7/Control (log2)') +
+  ylab('-log10 p-value') +
+  facet_wrap(~timepoint, ncol=1, scales='free_y') +
+  theme(strip.background=element_blank(), legend.position=c(0.75,0.25),
+        legend.text=element_text(size=10),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.spacing.x = unit(0, 'cm')) +
+  guides(color = guide_legend(override.aes = list(size = 2,
+                                                  shape = c(NA,20)) ) )
+
+print(p)
+ggsave(here('figures/plots/deqms_volcano.png'))
+ggsave(here('figures/plots/deqms_volcano.pdf'))
+```
+
+```{r}
+min_peptides_per_protein %>% saveRDS(here('results/min_peptides_per_protein.rds'))
+deqms_fit %>% saveRDS(here('results/deqms.rds'))
+```
+
+
+

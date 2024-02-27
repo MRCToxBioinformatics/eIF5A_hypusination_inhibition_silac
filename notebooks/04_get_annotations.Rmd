@@ -1,0 +1,252 @@
+---
+title: "Obtain protein annotations"
+author:
+  - name: "Tom Smith"
+    affiliation: "Cambridge Centre for Proteomics"
+  - name: "Charlotte Dawson"
+    affiliation: "Cambridge Centre for Proteomics"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+abstract: |
+  Here we take the GO terms directly annotated to each protein from the UniProt 
+  human proteome and expand them to include all ancestor terms. We also extract 
+  sequence features.
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, message=FALSE}
+suppressMessages(library(camprotR))
+suppressMessages(library(dplyr))
+suppressMessages(library(tidyr))
+suppressMessages(library(gtools))
+suppressMessages(library(parallel))
+suppressMessages(library(pbapply))
+suppressMessages(library(here))
+suppressMessages(library(uniprotREST))
+suppressMessages(library(Biostrings))
+
+
+```
+
+## Preamble
+
+Gene ontology (GO) terms are hierarchical; they may have ancestor terms and/or
+child terms. All popular GO over-representation tools seem to fail to consider 
+ancestor GO terms unless they are provided. As a motivating example, tRNA binding 
+proteins are not always annotated separately as both "tRNA-binding" and 
+"RNA-binding". For Uniprot, they will only have both annotations if 
+they are annotated as RNA binding via a difference source than their tRNA binding 
+annotation. 
+
+For this reason, when analysing the over-represented GO terms, it's necessary 
+to consider all the GO terms for a feature i.e. a protein, not just 
+those which are directly annotated to the feature. Therefore, in this notebook
+we will create an object containing all ancestor terms for the proteins quantified
+in these experiments
+
+## Load direct GO annotations
+```{r}
+all_ids <- readRDS(here('results/prot_proportion.rds')) %>% rownames()
+
+```
+
+Get all GO terms for our proteins
+```{r}
+
+res <-  uniprot_map(
+  ids = all_ids,
+  from = "UniProtKB_AC-ID",
+  to = "UniProtKB",
+  fields = c("go")
+)
+
+go_long <- res %>% filter(Gene.Ontology..GO.!='') %>%
+  separate_rows('Gene.Ontology..GO.', sep='; ') %>%
+  separate(Gene.Ontology..GO., into=c('GO', 'GO_ID'), sep=' \\[GO:') %>%
+  mutate(GO_ID=paste0('GO:', gsub(']', '', `GO_ID`))) %>%
+  rename('From'='UNIPROTKB')
+
+
+```
+
+
+
+```{r}
+saveRDS(go_long, here('results/go_long.rds'))
+
+```
+
+## An example: tRNA binding proteins
+
+```{r}
+go_rbp <- "GO:0003723" 
+go_trna_bp <- "GO:0000049"
+
+rbps <- go_long %>% 
+  filter(GO_ID == go_rbp) %>% 
+  pull(UNIPROTKB)
+
+trna_bps <- go_long %>% 
+  filter(GO_ID == go_trna_bp) %>% 
+  pull(UNIPROTKB)
+```
+
+```{r}
+sapply(trna_bps, FUN = function(x) x %in% rbps)
+```
+
+
+## Expand all human direct GO annotations
+
+```{r}
+go_all <- get_ancestor_go(
+  go_long,
+  feature_col = "UNIPROTKB",
+  go_col = "GO_ID",
+  verbose = TRUE
+)
+
+saveRDS(go_all, here('results/go_all.rds'))
+```
+
+## Back to tRNA binding proteins
+
+```{r}
+go_rbp <- "GO:0003723" 
+go_trna_bp <- "GO:0000049"
+
+rbps <- go_all %>% 
+  filter(GO_ID == go_rbp) %>% 
+  pull(UNIPROTKB)
+
+trna_bps <- go_all %>% 
+  filter(GO_ID == go_trna_bp) %>% 
+  pull(UNIPROTKB)
+```
+
+```{r}
+sapply(trna_bps, FUN = function(x) x %in% rbps)
+```
+Now it all looks correct - All tRNA binding proteins are also annotated as RBPs...
+
+# Sequences and amino acid compositions
+
+Get AA sequence for all proteins
+
+```{r}
+  
+
+res <-  uniprot_map(
+  ids = all_ids,
+  from = "UniProtKB_AC-ID",
+  to = "UniProtKB",
+  fields = c("sequence")) %>%
+  filter(!is.na(Sequence)) %>%
+  rename('From'='UNIPROTKB', 'Sequence'='SEQUENCE')
+
+
+```
+Get position of first proline.
+```{r}
+
+position_first_p <- data.frame(first_p=regexpr('P', res$SEQUENCE),
+                               first_pp=regexpr('PP', res$SEQUENCE),
+                               row.names=res$UNIPROTKB)
+```
+
+Count AA for protein sequences
+```{r}
+x <- Biostrings::AAStringSet(res$SEQUENCE)
+
+aa_count <- Biostrings::alphabetFrequency(x) %>% data.frame()
+aa_count <- aa_count[,colSums(aa_count)>0]
+aa_count$total <- rowSums(aa_count)
+rownames(aa_count) <- res$UNIPROTKB
+
+```
+
+Count proline stretches
+```{r}
+p_i_counts <- lapply(2:8, function(i){
+  # pattern extended from https://stackoverflow.com/questions/30945441/count-unique-occurrences-in-text-string-in-r
+  pattern <- sprintf('(?=%s)', paste(rep('P', i), collapse=''))
+  print(pattern)
+  counts <- sapply(res$SEQUENCE, function(x){
+    sapply(gregexpr(pattern, x, perl=T) , function(i) length(i[i>0]))
+  })
+  return(counts)
+})
+
+names(p_i_counts) <- lapply(2:8, function(i) paste(rep('P', i), collapse=''))
+length(p_i_counts)
+p_i_counts <- bind_cols(p_i_counts) %>% data.frame()
+
+rownames(p_i_counts) <- res$UNIPROTKB
+
+
+
+```
+
+
+Count di-AA and tri-AA
+```{r}
+# Biostrings doesn't allow kmer extract for AA sequence unfortunately
+# This takes waaaay longer than it should, but still within the minutes range
+# (~15 min), so I'm too lazy to optimise...
+
+
+AAs <- setdiff(Biostrings::AA_ALPHABET, c('*', '-', '+', '.'))
+## Permutation with replacement
+
+
+
+freq_kmers <- function(k, cores=6){
+  
+  perms <- permutations(n = length(AAs),
+                        r = k,
+                        v = AAs,
+                        repeats.allowed = TRUE)
+  
+  kmers <- apply(perms, MARGIN=1, function(x) paste(x, collapse=''))
+
+  cl = makeCluster(cores, type='FORK')
+  on.exit(stopCluster(cl))
+  
+  counts <- pblapply(kmers, function(x){
+    pattern <- sprintf('(?=%s)', x)
+    print(pattern)
+    counts <- sapply(res$SEQUENCE, function(x){
+     sapply(gregexpr(pattern, x, perl=T) , function(i) length(i[i>0]))
+    })
+    return(counts)
+  }, cl=cl)
+  
+  freq_df <- bind_cols(counts) %>% sweep(1, aa_count$total, `/`) %>% data.frame()
+ 
+  colnames(freq_df) <- kmers
+  rownames(freq_df) <- res$UNIPROTKB
+
+  return(freq_df)
+}
+
+
+di_freq <- freq_kmers(k=2)
+tri_freq  <- freq_kmers(k=3)
+
+
+```
+
+
+
+
+```{r}
+saveRDS(aa_count, here('results/aa_count.rds'))
+saveRDS(p_i_counts, here('results/p_i_counts.rds'))
+saveRDS(di_freq, here('results/di_freq.rds'))
+saveRDS(tri_freq, here('results/tri_freq.rds'))
+saveRDS(position_first_p, here('results/position_first_p.rds'))
+
+
+```
+
