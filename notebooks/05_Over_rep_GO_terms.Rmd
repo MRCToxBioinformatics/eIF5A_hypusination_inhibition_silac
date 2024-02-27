@@ -86,7 +86,8 @@ OK, so that's a clear relationship!!
 
 ```{r}
 saveRDS(over_rep_go, here('results/over_rep_go.rds'))
-saveRDS(over_rep_go_length, here('results/over_rep_go_length.rds'))
+saveRDS(over_rep_go_flt, here('results/over_rep_go_flt.rds'))
+
 
 
 ```
@@ -207,7 +208,7 @@ to_plot_ecdf <- deqms_fit_annot %>% names() %>% lapply(function(timepoint){
 
 to_plot_ecdf %>%
   bind_rows() %>%
-  filter(GO_term %in% c('cytosolic ribosome subunit', 'mitochondrial matrix', 'Other')) %>%
+  filter(GO_term %in% c('cytosolic ribosome', 'mitochondrial matrix', 'Other')) %>%
   group_by(time, GO_term) %>%
   tally()
 to_plot_ecdf %>%
@@ -216,7 +217,7 @@ to_plot_ecdf %>%
 
 p <- to_plot_ecdf %>%
   bind_rows() %>%
-  filter(GO_term %in% c('cytosolic ribosome subunit','mitochondrial matrix', 'Other')) %>%
+  filter(GO_term %in% c('cytosolic ribosome','mitochondrial matrix', 'Other')) %>%
   mutate(time=factor(sprintf('%s hr', time), levels=c('3 hr','6 hr','24 hr'))) %>%
   ggplot(aes(logFC, as.numeric(Present), colour=GO_term)) +
   stat_ecdf() +
@@ -240,7 +241,7 @@ mitocarta <- suppressWarnings(readxl::read_excel(here('external/MitoCarta/Human.
 
 
 
-```{r, fig.width=8, fig.height=8}
+```{r, fig.width=5, fig.height=5}
 to_plot_ecdf_mitocarta <- deqms_fit %>% bind_rows(.id='time') %>%
   merge(mitocarta[,c('UniProt', 'MitoCarta3.0_SubMitoLocalization', 'MitoCarta3.0_MitoPathways', 'HPA_Main_Location_2020 (Reliability)', 'TargetP_Score', 'MitoCarta3.0_Evidence')],
         by.x='entry', by.y='UniProt', all.x=TRUE) %>%
@@ -304,13 +305,13 @@ mt_other <- to_plot_ecdf %>%
 ribo_other <- to_plot_ecdf %>%
   bind_rows() %>%
   group_by(time) %>%
-  group_modify(~ broom::tidy(apply_ks_test_to_data(., "cytosolic ribosome subunit"))) %>%
+  group_modify(~ broom::tidy(apply_ks_test_to_data(., "cytosolic ribosome"))) %>%
   mutate(comparison='Ribo vs Other')
 
 mt_ribo <- to_plot_ecdf %>%
   bind_rows() %>%
   group_by(time) %>%
-  group_modify(~ broom::tidy(apply_ks_test_to_data(., "mitochondrial matrix", "cytosolic ribosome subunit"))) %>%
+  group_modify(~ broom::tidy(apply_ks_test_to_data(., "mitochondrial matrix", "cytosolic ribosome"))) %>%
   mutate(comparison='Mt vs Ribo')
 
 

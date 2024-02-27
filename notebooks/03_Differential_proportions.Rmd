@@ -43,6 +43,7 @@ Options 1 is testing the hypothesis that treatment has an effect independent of 
 ```{r}
 suppressMessages(library(tidyr))
 suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
 suppressMessages(library(biobroom))
 suppressMessages(library(MSnbase))
 suppressMessages(library(camprotR))

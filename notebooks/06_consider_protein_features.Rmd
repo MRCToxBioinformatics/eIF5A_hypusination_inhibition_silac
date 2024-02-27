@@ -17,6 +17,7 @@ output:
 suppressMessages(library(goseq))
 suppressMessages(library(tidyr))
 suppressMessages(library(dplyr))
+suppressMessages(library(stringr))
 suppressMessages(library(camprotR))
 suppressMessages(library(glmnet))
 suppressMessages(library(here))
@@ -505,28 +506,5 @@ ggsave(here('figures/plots/GO_term_vs_freq_pos_charged_AA.pdf'))
 
 
 
-
-```{r}
-to_plot_kr_freq_all <- to_plot %>%
-  merge(aa_count[, c('K','R','total')], by.x='entry', by.y='row.names') %>%
-  mutate(freq_long_chain_pos=(K+R)/total)
-
-p <- to_plot_kr_freq_all %>%
-  filter(!is.na(sca.adj.pval)) %>%
-  ggplot(aes(freq_long_chain_pos, logFC)) +
-  geom_point(alpha=0.1, size=0.1) +
-  theme_camprot(base_size=15, border=FALSE, base_family='sans') +
-  scale_colour_manual(values=get_cat_palette(3), name='') +
-  theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1)) +
-  ylab('GC7 vs control (log2)') +
-  xlab('Long-chain positively\n charged AA frequency') +
-  geom_smooth(colour=get_cat_palette(1)) +
-  facet_grid((gsub(' ', '\n', GO_term))~timepoint) +
-  theme(strip.background=element_blank())
-
-print(p)
-ggsave(here('figures/plots/pos_charged_AA_vs_GC7_impact_GO_term_split.png'))
-ggsave(here('figures/plots/pos_charged_AA_vs_GC7_impact_GO_term_split.pdf'))
-```
 
 

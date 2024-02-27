@@ -1,3 +1,5 @@
+library(ggplot2)
+
 # set up standardized plotting scheme
 theme_set(theme_classic(base_size = 20) +
             theme(panel.grid.major=element_blank(),

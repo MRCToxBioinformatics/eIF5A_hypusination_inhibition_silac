@@ -33,6 +33,7 @@ pRoc\
 parallel\
 pbapply\
 RColorBrewer\
+stringr\
 tidyr\
 writexl\
 
