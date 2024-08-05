@@ -174,4 +174,38 @@ compare_proportions_conditions %>%
 OK, great, so there is a good correlation between the conditions, but at 3hr there seem to be more proteins off the diagonal (higher or lower translation with GC7 inhibition). I suspect this is just less accurate quantification. Later, we'll see if these are consistent differences.
 
 
+Below, we plot a PCA for the proportions. Note, the major souce of variance is the time, since we will enevitably have more nascent protein at 24h than 3h or 6h. The effect of GC7 is 1-2 orders of magnitude less than the difference between the time points.
 
+```{r, fig.height=5, fig.width=8}
+pca <- prot_proportions %>%
+  filterNA() %>%
+  exprs() %>%
+  t() %>%
+  prcomp(scale=TRUE, centre=TRUE)
+
+pov <- summary(pca)$importance[2,]
+
+p <- pca$x %>%
+  data.frame() %>%
+  tibble::rownames_to_column('sample') %>%
+  separate(sample, into=c('Time', 'Treatment', 'replicate')) %>%
+  mutate(Time=factor(Time, levels=c(3,6,24))) %>%
+  mutate(Treatment=recode(Treatment, 'untrt'='Control')) %>%
+  ggplot(aes(PC1, PC2, fill=Time, shape=Treatment)) +
+  geom_point(size=5) +
+  scale_shape_manual(values=c(21,25)) +
+  scale_fill_manual(values=get_cat_palette(3),
+                    guide = guide_legend(override.aes = list(size = 6, shape = 21)),
+                    name='Time (h)') +
+  xlab(sprintf('PC1 (%s%%)', 100*round(pov[1], 2))) +
+  ylab(sprintf('PC2 (%s%%)', 100*round(pov[2], 2))) +
+  theme(aspect.ratio=1)
+
+print(p)
+
+ggsave(here('figures/plots/pca_proportions.pdf'))
+ggsave(here('figures/plots/pca_proportions.png'))
+  
+```
+
+ 

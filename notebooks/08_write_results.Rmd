@@ -25,6 +25,26 @@ proportions <- readRDS(here("results/prot_proportion.rds"))
 deqms_fit <- readRDS(here("results/deqms_go_annot.rds"))
 ```
 
+Select subset of columns for DEqMS statistical test results and remove proteins with no stat test results.
+```{r}
+deqms_fit <- deqms_fit %>% lapply(function(x){
+  x %>%
+  select('UniprotID'=Updated.Master.Protein.Accessions,
+         'UniprotID description'=Master.Protein.Descriptions,
+         'log2FC'=logFC,
+         'DEqMS_p_value'=sca.P.Value,
+         'DEqMS_adj_p_value'=sca.adj.pval,
+         cytosolic_ribosome,
+         mitochondrial_matrix) %>%
+    filter(is.finite(DEqMS_p_value))
+  })
+```
+
+Reorder timepoints in stats results
+```{r}
+deqms_fit <- deqms_fit[order(as.numeric(names(deqms_fit)))]
+
+```
 
 
 Save output to excel files
@@ -36,8 +56,18 @@ write_xlsx(deqms_fit,
   use_zip64 = FALSE)
 ```
 
+Reformat the abundance matrix for the proportions `MSnSet` and write to file. 
 ```{r}
-proportions_data_to_write <- data.frame(exprs(proportions))
+
+proportions <- proportions[,order(as.numeric(pData(proportions)$type), pData(proportions)$condition=='GC7')]
+
+proportions_data_to_write <- data.frame(exprs(proportions)) %>%
+  tibble::rownames_to_column('UniprotID')
+
+colnames(proportions_data_to_write) <- camprotR::remove_x(colnames(proportions_data_to_write))
+colnames(proportions_data_to_write) <- gsub('untrt', 'Control', colnames(proportions_data_to_write))
+colnames(proportions_data_to_write) <- gsub('_(C|G)', 'h_\\1', colnames(proportions_data_to_write))
+colnames(proportions_data_to_write) <- gsub('(l|7)_', '\\1_rep', colnames(proportions_data_to_write))
 
 write_xlsx(proportions_data_to_write,
   path = here("results/proportions.xlsx"),
