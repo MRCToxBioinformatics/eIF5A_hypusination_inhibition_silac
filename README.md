@@ -6,7 +6,7 @@ Analysis of an experiment to study eIF5A-dependent translation using GC7 inhibit
 
 ## Directory structure:
 - raw: PSM and peptide-level output from PD. One for each experiment
-- notebooks: R markdown notebooks for all analysis. Run in denoted order. See 99_final_report for the overall summary
+- notebooks: R markdown notebooks for all analysis. Run in denoted order.
 - results: Output from analysis notebooks
 - external: Data from previous studies
 - figures: Plots for publication
@@ -35,7 +35,7 @@ pbapply\
 RColorBrewer\
 stringr\
 tidyr\
-writexl\
+writexl
 
 *Bioconductor*\
 MSnbase\
